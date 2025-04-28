@@ -1,24 +1,7 @@
+// SPDX-License-Identifier: MIT
 /*
 Copyright (c) 2007, 2008 by Juliusz Chroboczek
 Copyright 2011 by Matthieu Boutier and Juliusz Chroboczek
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
 */
 
 #ifndef BABEL_UTIL_H
@@ -27,6 +10,9 @@ THE SOFTWARE.
 #include "babeld.h"
 #include "babel_main.h"
 #include "log.h"
+#include "memory.h"
+
+DECLARE_MGROUP(BABELD);
 
 #if defined(i386) || defined(__mc68020__) || defined(__x86_64__)
 #define DO_NTOHS(_d, _s) do{ _d = ntohs(*(const unsigned short*)(_s)); }while(0)
@@ -61,19 +47,19 @@ seqno_compare(unsigned short s1, unsigned short s2)
     if(s1 == s2)
         return 0;
     else
-        return ((s2 - s1) & 0x8000) ? 1 : -1;
+        return (CHECK_FLAG((s2 - s1), 0x8000)) ? 1 : -1;
 }
 
 static inline short
 seqno_minus(unsigned short s1, unsigned short s2)
 {
-    return (short)((s1 - s2) & 0xFFFF);
+    return (short)(CHECK_FLAG((s1 - s2), 0xFFFF));
 }
 
 static inline unsigned short
 seqno_plus(unsigned short s, int plus)
 {
-    return ((s + plus) & 0xFFFF);
+    return CHECK_FLAG((s + plus), 0xFFFF);
 }
 
 /* Returns a time in microseconds on 32 bits (thus modulo 2^32,
@@ -97,9 +83,6 @@ void timeval_min(struct timeval *d, const struct timeval *s);
 void timeval_min_sec(struct timeval *d, time_t secs);
 int parse_nat(const char *string) ATTRIBUTE ((pure));
 int parse_msec(const char *string) ATTRIBUTE ((pure));
-int in_prefix(const unsigned char *restrict address,
-              const unsigned char *restrict prefix, unsigned char plen)
-    ATTRIBUTE ((pure));
 unsigned char *mask_prefix(unsigned char *restrict ret,
                            const unsigned char *restrict prefix,
                            unsigned char plen);
@@ -119,20 +102,20 @@ void uchar_to_inaddr(struct in_addr *dest, const unsigned char *src);
 void in6addr_to_uchar(unsigned char *dest, const struct in6_addr *src);
 void uchar_to_in6addr(struct in6_addr *dest, const unsigned char *src);
 int daemonise(void);
-const unsigned char v4prefix[16];
+extern const unsigned char v4prefix[16];
+
+static inline bool
+is_default(const unsigned char *prefix, int plen)
+{
+    return plen == 0 || (plen == 96 && v4mapped(prefix));
+}
 
 /* If debugging is disabled, we want to avoid calling format_address
    for every omitted debugging message.  So debug is a macro.  But
    vararg macros are not portable. */
 #if defined NO_DEBUG
 
-#if defined __STDC_VERSION__ && __STDC_VERSION__ >= 199901L
 #define debugf(...) do {} while(0)
-#elif defined __GNUC__
-#define debugf(_args...) do {} while(0)
-#else
-static inline void debugf(int level, const char *format, ...) { return; }
-#endif
 
 #else /* NO_DEBUG */
 
@@ -145,19 +128,11 @@ static inline void debugf(int level, const char *format, ...) { return; }
 #define BABEL_DEBUG_ROUTE       (1 << 5)
 #define BABEL_DEBUG_ALL         (0xFFFF)
 
-#if defined __STDC_VERSION__ && __STDC_VERSION__ >= 199901L
-#define debugf(level, ...) \
-do { \
-if(UNLIKELY(debug & level)) zlog_debug(__VA_ARGS__);     \
-} while(0)
-#elif defined __GNUC__
-#define debugf(level, _args...) \
-do { \
-if(UNLIKELY(debug & level)) zlog_debug(_args);   \
-} while(0)
-#else
-static inline void debugf(int level, const char *format, ...) { return; }
-#endif
+#define debugf(level, ...)                                                     \
+	do {                                                                   \
+		if (unlikely(CHECK_FLAG(debug, level)))                            \
+			zlog_debug(__VA_ARGS__);                               \
+	} while (0)
 
 #endif /* NO_DEBUG */
 

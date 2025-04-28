@@ -1,19 +1,8 @@
+// SPDX-License-Identifier: ISC
 /*	$OpenBSD$ */
 
 /*
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #include <zebra.h>
@@ -36,28 +25,28 @@ send_notification_full(struct tcp_conn *tcp, struct notify_msg *nm)
 
 	/* calculate size */
 	size = LDP_HDR_SIZE + LDP_MSG_SIZE + STATUS_SIZE;
-	if (nm->flags & F_NOTIF_PW_STATUS)
+	if (CHECK_FLAG(nm->flags, F_NOTIF_PW_STATUS))
 		size += PW_STATUS_TLV_SIZE;
-	if (nm->flags & F_NOTIF_FEC)
+	if (CHECK_FLAG(nm->flags, F_NOTIF_FEC))
 		size += len_fec_tlv(&nm->fec);
-	if (nm->flags & F_NOTIF_RETURNED_TLVS)
+	if (CHECK_FLAG(nm->flags, F_NOTIF_RETURNED_TLVS))
 		size += TLV_HDR_SIZE * 2 + nm->rtlvs.length;
 
 	if ((buf = ibuf_open(size)) == NULL)
 		fatal(__func__);
 
-	err |= gen_ldp_hdr(buf, size);
+	SET_FLAG(err, gen_ldp_hdr(buf, size));
 	size -= LDP_HDR_SIZE;
-	err |= gen_msg_hdr(buf, MSG_TYPE_NOTIFICATION, size);
-	err |= gen_status_tlv(buf, nm->status_code, nm->msg_id, nm->msg_type);
+	SET_FLAG(err, gen_msg_hdr(buf, MSG_TYPE_NOTIFICATION, size));
+	SET_FLAG(err, gen_status_tlv(buf, nm->status_code, nm->msg_id, nm->msg_type));
 	/* optional tlvs */
-	if (nm->flags & F_NOTIF_PW_STATUS)
-		err |= gen_pw_status_tlv(buf, nm->pw_status);
-	if (nm->flags & F_NOTIF_FEC)
-		err |= gen_fec_tlv(buf, &nm->fec);
-	if (nm->flags & F_NOTIF_RETURNED_TLVS)
-		err |= gen_returned_tlvs(buf, nm->rtlvs.type, nm->rtlvs.length,
-		    nm->rtlvs.data);
+	if (CHECK_FLAG(nm->flags, F_NOTIF_PW_STATUS))
+		SET_FLAG(err, gen_pw_status_tlv(buf, nm->pw_status));
+	if (CHECK_FLAG(nm->flags, F_NOTIF_FEC))
+		SET_FLAG(err, gen_fec_tlv(buf, &nm->fec));
+	if (CHECK_FLAG(nm->flags, F_NOTIF_RETURNED_TLVS))
+		SET_FLAG(err, gen_returned_tlvs(buf, nm->rtlvs.type, nm->rtlvs.length,
+		    nm->rtlvs.data));
 	if (err) {
 		ibuf_free(buf);
 		return;
@@ -67,6 +56,36 @@ send_notification_full(struct tcp_conn *tcp, struct notify_msg *nm)
 		log_msg_notification(1, tcp->nbr, nm);
 		nbr_fsm(tcp->nbr, NBR_EVT_PDU_SENT);
 		tcp->nbr->stats.notif_sent++;
+	}
+
+	/* update SNMP session counters */
+	switch (nm->status_code) {
+	case S_NO_HELLO:
+		leconf->stats.session_rejects_hello++;
+		break;
+	case S_BAD_LDP_ID:
+		leconf->stats.bad_ldp_id++;
+		break;
+	case S_BAD_PDU_LEN:
+		leconf->stats.bad_pdu_len++;
+		break;
+	case S_BAD_MSG_LEN:
+		leconf->stats.bad_msg_len++;
+		break;
+	case S_BAD_TLV_LEN:
+		leconf->stats.bad_tlv_len++;
+		break;
+	case S_BAD_TLV_VAL:
+		leconf->stats.malformed_tlv++;
+		break;
+	case S_KEEPALIVE_TMR:
+		leconf->stats.keepalive_timer_exp++;
+		break;
+	case S_SHUTDOWN:
+		leconf->stats.shutdown_send_notify++;
+		break;
+	default:
+		break;
 	}
 
 	evbuf_enqueue(&tcp->wbuf, buf);
@@ -102,7 +121,7 @@ send_notification_rtlvs(struct nbr *nbr, uint32_t status_code, uint32_t msg_id,
 		nm.rtlvs.type = tlv_type;
 		nm.rtlvs.length = tlv_len;
 		nm.rtlvs.data = tlv_data;
-		nm.flags |= F_NOTIF_RETURNED_TLVS;
+		SET_FLAG(nm.flags, F_NOTIF_RETURNED_TLVS);
 	}
 
 	send_notification_full(nbr->tcp, &nm);
@@ -122,6 +141,7 @@ recv_notification(struct nbr *nbr, char *buf, uint16_t len)
 
 	if (len < STATUS_SIZE) {
 		session_shutdown(nbr, S_BAD_MSG_LEN, msg.id, msg.type);
+		leconf->stats.bad_msg_len++;
 		return (-1);
 	}
 	memcpy(&st, buf, sizeof(st));
@@ -129,6 +149,7 @@ recv_notification(struct nbr *nbr, char *buf, uint16_t len)
 	if (ntohs(st.length) > STATUS_SIZE - TLV_HDR_SIZE ||
 	    ntohs(st.length) > len - TLV_HDR_SIZE) {
 		session_shutdown(nbr, S_BAD_TLV_LEN, msg.id, msg.type);
+		leconf->stats.bad_tlv_len++;
 		return (-1);
 	}
 	buf += STATUS_SIZE;
@@ -145,6 +166,7 @@ recv_notification(struct nbr *nbr, char *buf, uint16_t len)
 
 		if (len < sizeof(tlv)) {
 			session_shutdown(nbr, S_BAD_TLV_LEN, msg.id, msg.type);
+			leconf->stats.bad_tlv_len++;
 			return (-1);
 		}
 
@@ -153,6 +175,7 @@ recv_notification(struct nbr *nbr, char *buf, uint16_t len)
 		tlv_len = ntohs(tlv.length);
 		if (tlv_len + TLV_HDR_SIZE > len) {
 			session_shutdown(nbr, S_BAD_TLV_LEN, msg.id, msg.type);
+			leconf->stats.bad_tlv_len++;
 			return (-1);
 		}
 		buf += TLV_HDR_SIZE;
@@ -166,13 +189,12 @@ recv_notification(struct nbr *nbr, char *buf, uint16_t len)
 			break;
 		case TLV_TYPE_PW_STATUS:
 			if (tlv_len != 4) {
-				session_shutdown(nbr, S_BAD_TLV_LEN,
-				    msg.id, msg.type);
+				session_shutdown(nbr, S_BAD_TLV_LEN, msg.id, msg.type);
 				return (-1);
 			}
 
 			nm.pw_status = ntohl(*(uint32_t *)buf);
-			nm.flags |= F_NOTIF_PW_STATUS;
+			SET_FLAG(nm.flags, F_NOTIF_PW_STATUS);
 			break;
 		case TLV_TYPE_FEC:
 			if ((tlen = tlv_decode_fec_elm(nbr, &msg, buf,
@@ -180,16 +202,18 @@ recv_notification(struct nbr *nbr, char *buf, uint16_t len)
 				return (-1);
 			/* allow only one fec element */
 			if (tlen != tlv_len) {
-				session_shutdown(nbr, S_BAD_TLV_VAL,
-				    msg.id, msg.type);
+				session_shutdown(nbr, S_BAD_TLV_VAL, msg.id, msg.type);
+				leconf->stats.bad_tlv_len++;
 				return (-1);
 			}
-			nm.flags |= F_NOTIF_FEC;
+			SET_FLAG(nm.flags, F_NOTIF_FEC);
 			break;
 		default:
-			if (!(ntohs(tlv.type) & UNKNOWN_FLAG))
+			if (!(ntohs(tlv.type) & UNKNOWN_FLAG)) {
+				nbr->stats.unknown_tlv++;
 				send_notification_rtlvs(nbr, S_UNKNOWN_TLV,
 				    msg.id, msg.type, tlv_type, tlv_len, buf);
+			}
 			/* ignore unknown tlv */
 			break;
 		}
@@ -200,9 +224,8 @@ recv_notification(struct nbr *nbr, char *buf, uint16_t len)
 	/* sanity checks */
 	switch (nm.status_code) {
 	case S_PW_STATUS:
-		if (!(nm.flags & (F_NOTIF_PW_STATUS|F_NOTIF_FEC))) {
-			send_notification(nbr->tcp, S_MISS_MSG,
-			    msg.id, msg.type);
+		if (!CHECK_FLAG(nm.flags, (F_NOTIF_PW_STATUS|F_NOTIF_FEC))) {
+			send_notification(nbr->tcp, S_MISS_MSG, msg.id, msg.type);
 			return (-1);
 		}
 
@@ -210,20 +233,17 @@ recv_notification(struct nbr *nbr, char *buf, uint16_t len)
 		case MAP_TYPE_PWID:
 			break;
 		default:
-			send_notification(nbr->tcp, S_BAD_TLV_VAL,
-			    msg.id, msg.type);
+			send_notification(nbr->tcp, S_BAD_TLV_VAL, msg.id, msg.type);
 			return (-1);
 		}
 		break;
 	case S_ENDOFLIB:
-		if (!(nm.flags & F_NOTIF_FEC)) {
-			send_notification(nbr->tcp, S_MISS_MSG,
-			    msg.id, msg.type);
+		if (!CHECK_FLAG(nm.flags, F_NOTIF_FEC)) {
+			send_notification(nbr->tcp, S_MISS_MSG, msg.id, msg.type);
 			return (-1);
 		}
 		if (nm.fec.type != MAP_TYPE_TYPED_WCARD) {
-			send_notification(nbr->tcp, S_BAD_TLV_VAL,
-			    msg.id, msg.type);
+			send_notification(nbr->tcp, S_BAD_TLV_VAL, msg.id, msg.type);
 			return (-1);
 		}
 		break;
@@ -233,7 +253,7 @@ recv_notification(struct nbr *nbr, char *buf, uint16_t len)
 
 	log_msg_notification(0, nbr, &nm);
 
-	if (st.status_code & htonl(STATUS_FATAL)) {
+	if (CHECK_FLAG(st.status_code, htonl(STATUS_FATAL))) {
 		if (nbr->state == NBR_STA_OPENSENT)
 			nbr_start_idtimer(nbr);
 
@@ -243,20 +263,53 @@ recv_notification(struct nbr *nbr, char *buf, uint16_t len)
 		 * initialization, it SHOULD transmit a Shutdown message and
 		 * then close the transport connection".
 		 */
-		if (nbr->state != NBR_STA_OPER && nm.status_code == S_SHUTDOWN)
-			send_notification(nbr->tcp, S_SHUTDOWN,
-			    msg.id, msg.type);
+		if (nbr->state != NBR_STA_OPER && nm.status_code == S_SHUTDOWN) {
+			leconf->stats.session_attempts++;
+			send_notification(nbr->tcp, S_SHUTDOWN, msg.id, msg.type);
+		}
 
+		leconf->stats.shutdown_rcv_notify++;
 		nbr_fsm(nbr, NBR_EVT_CLOSE_SESSION);
 		return (-1);
 	}
 
-	/* lde needs to know about a few notification messages */
+	/* lde needs to know about a few notification messages
+	 * and update SNMP session counters
+	 */
 	switch (nm.status_code) {
 	case S_PW_STATUS:
 	case S_ENDOFLIB:
-		ldpe_imsg_compose_lde(IMSG_NOTIFICATION, nbr->peerid, 0,
-		    &nm, sizeof(nm));
+		ldpe_imsg_compose_lde(IMSG_NOTIFICATION, nbr->peerid, 0, &nm, sizeof(nm));
+		break;
+	case S_NO_HELLO:
+		leconf->stats.session_rejects_hello++;
+		break;
+	case S_PARM_ADV_MODE:
+		leconf->stats.session_rejects_ad++;
+		break;
+	case S_MAX_PDU_LEN:
+		leconf->stats.session_rejects_max_pdu++;
+		break;
+	case S_PARM_L_RANGE:
+		leconf->stats.session_rejects_lr++;
+		break;
+	case S_BAD_LDP_ID:
+		leconf->stats.bad_ldp_id++;
+		break;
+	case S_BAD_PDU_LEN:
+		leconf->stats.bad_pdu_len++;
+		break;
+	case S_BAD_MSG_LEN:
+		leconf->stats.bad_msg_len++;
+		break;
+	case S_BAD_TLV_LEN:
+		leconf->stats.bad_tlv_len++;
+		break;
+	case S_BAD_TLV_VAL:
+		leconf->stats.malformed_tlv++;
+		break;
+	case S_SHUTDOWN:
+		leconf->stats.shutdown_rcv_notify++;
 		break;
 	default:
 		break;
@@ -299,8 +352,8 @@ gen_returned_tlvs(struct ibuf *buf, uint16_t type, uint16_t length,
 	tlv.length = htons(length);
 
 	err = ibuf_add(buf, &rtlvs, sizeof(rtlvs));
-	err |= ibuf_add(buf, &tlv, sizeof(tlv));
-	err |= ibuf_add(buf, tlv_data, length);
+	SET_FLAG(err, ibuf_add(buf, &tlv, sizeof(tlv)));
+	SET_FLAG(err, ibuf_add(buf, tlv_data, length));
 
 	return (err);
 }
@@ -309,17 +362,16 @@ void
 log_msg_notification(int out, struct nbr *nbr, struct notify_msg *nm)
 {
 	if (nm->status_code & STATUS_FATAL) {
-		debug_msg(out, "notification: lsr-id %s, status %s "
-		    "(fatal error)", inet_ntoa(nbr->id),
+		debug_msg(out, "notification: lsr-id %pI4, status %s (fatal error)", &nbr->id,
 		    status_code_name(nm->status_code));
 		return;
 	}
 
-	debug_msg(out, "notification: lsr-id %s, status %s",
-	    inet_ntoa(nbr->id), status_code_name(nm->status_code));
-	if (nm->flags & F_NOTIF_FEC)
+	debug_msg(out, "notification: lsr-id %pI4, status %s",
+	    &nbr->id, status_code_name(nm->status_code));
+	if (CHECK_FLAG(nm->flags, F_NOTIF_FEC))
 		debug_msg(out, "notification:   fec %s", log_map(&nm->fec));
-	if (nm->flags & F_NOTIF_PW_STATUS)
+	if (CHECK_FLAG(nm->flags, F_NOTIF_PW_STATUS))
 		debug_msg(out, "notification:   pw-status %s",
-		    (nm->pw_status) ? "not forwarding" : "forwarding");
+		    (nm->pw_status == PW_FORWARDING) ? "forwarding" : "not forwarding");
 }

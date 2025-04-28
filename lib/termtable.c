@@ -1,32 +1,21 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ASCII table generator.
  * Copyright (C) 2017  Cumulus Networks
  * Quentin Young
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 #include <zebra.h>
 #include <stdio.h>
 
+#include "lib/json.h"
+#include "printfrr.h"
 #include "memory.h"
 #include "termtable.h"
 
-DEFINE_MTYPE_STATIC(LIB, TTABLE, "ASCII table")
+DEFINE_MTYPE_STATIC(LIB, TTABLE, "ASCII table");
 
 /* clang-format off */
-struct ttable_style ttable_styles[] = {
+const struct ttable_style ttable_styles[] = {
 	{	// default ascii
 		.corner = '+',
 		.rownums_on = false,
@@ -98,7 +87,7 @@ void ttable_del(struct ttable *tt)
 	XFREE(MTYPE_TTABLE, tt);
 }
 
-struct ttable *ttable_new(struct ttable_style *style)
+struct ttable *ttable_new(const struct ttable_style *style)
 {
 	struct ttable *tt;
 
@@ -129,11 +118,13 @@ struct ttable *ttable_new(struct ttable_style *style)
  *
  * @return pointer to the first cell of allocated row
  */
+PRINTFRR(3, 0)
 static struct ttable_cell *ttable_insert_row_va(struct ttable *tt, int i,
 						const char *format, va_list ap)
 {
 	assert(i >= -1 && i < tt->nrows);
 
+	char shortbuf[256];
 	char *res, *orig, *section;
 	struct ttable_cell *row;
 	int col = 0;
@@ -158,9 +149,7 @@ static struct ttable_cell *ttable_insert_row_va(struct ttable *tt, int i,
 	/* CALLOC a block of cells */
 	row = XCALLOC(MTYPE_TTABLE, tt->ncols * sizeof(struct ttable_cell));
 
-	res = NULL;
-	vasprintf(&res, format, ap);
-
+	res = vasnprintfrr(MTYPE_TMP, shortbuf, sizeof(shortbuf), format, ap);
 	orig = res;
 
 	while (res && col < tt->ncols) {
@@ -170,7 +159,8 @@ static struct ttable_cell *ttable_insert_row_va(struct ttable *tt, int i,
 		col++;
 	}
 
-	free(orig);
+	if (orig != shortbuf)
+		XFREE(MTYPE_TMP, orig);
 
 	/* insert row */
 	if (i == -1 || i == tt->nrows)
@@ -373,7 +363,7 @@ char *ttable_dump(struct ttable *tt, const char *newline)
 		memcpy(&right[0], newline, nl_len);
 
 	/* allocate print buffer */
-	buf = XCALLOC(MTYPE_TMP, width * (nlines + 1) + 1);
+	buf = XCALLOC(MTYPE_TMP_TTABLE, width * (nlines + 1) + 1);
 	pos = 0;
 
 	if (tt->style.border.top_on) {
@@ -434,13 +424,12 @@ char *ttable_dump(struct ttable *tt, const char *newline)
 				abspad -= row[j].style.border.right_on ? 1 : 0;
 
 			/* print text */
-			const char *fmt;
 			if (row[j].style.align == LEFT)
-				fmt = "%-*s";
+				pos += sprintf(&buf[pos], "%-*s", abspad,
+					       row[j].text);
 			else
-				fmt = "%*s";
-
-			pos += sprintf(&buf[pos], fmt, abspad, row[j].text);
+				pos += sprintf(&buf[pos], "%*s", abspad,
+					       row[j].text);
 
 			/* print right padding */
 			for (int k = 0; k < row[j].style.rpad; k++)
@@ -496,4 +485,94 @@ char *ttable_dump(struct ttable *tt, const char *newline)
 	XFREE(MTYPE_TTABLE, right);
 
 	return buf;
+}
+
+/* Crude conversion from ttable to json array.
+ * Assume that the first row has column headings.
+ *
+ * Formats are:
+ *   d	int32
+ *   f	double
+ *   l	int64
+ *   s	string (default)
+ */
+static json_object *ttable_json_internal(struct ttable *tt,
+					 const char *const formats,
+					 const char *row_text[])
+{
+	struct ttable_cell *row; /* iteration pointers */
+	json_object *json = NULL;
+
+	json = json_object_new_array();
+
+	for (int i = 1; i < tt->nrows; i++) {
+		json_object *jobj;
+		json_object *val;
+
+		row = tt->table[i];
+		jobj = json_object_new_object();
+		json_object_array_add(json, jobj);
+		for (int j = 0; j < tt->ncols; j++) {
+			switch (formats[j]) {
+			case 'd':
+			case 'l':
+				val = json_object_new_int64(atol(row[j].text));
+				break;
+			case 'f':
+				val = json_object_new_double(atof(row[j].text));
+				break;
+			default:
+				val = json_object_new_string(row[j].text);
+			}
+			if (row_text)
+				json_object_object_add(jobj, row_text[j], val);
+			else
+				json_object_object_add(jobj,
+						       tt->table[0][j].text,
+						       val);
+		}
+	}
+
+	return json;
+}
+
+json_object *ttable_json(struct ttable *tt, const char *const formats)
+{
+	return ttable_json_internal(tt, formats, NULL);
+}
+
+json_object *ttable_json_with_json_text(struct ttable *tt,
+					const char *const formats,
+					const char *json_override_text)
+{
+	char **row_name; /* iteration pointers */
+	char *res, *section, *orig;
+	int col = 0;
+	int ncols = 0, j;
+	json_object *json = NULL;
+
+	if (json_override_text) {
+		/* count how many columns we have */
+		for (j = 0; json_override_text[j]; j++)
+			ncols += !!(json_override_text[j] == '|');
+		ncols++;
+	}
+	if (json_override_text == NULL || ncols != tt->ncols)
+		return ttable_json_internal(tt, formats, NULL);
+
+	/* CALLOC a block of cells */
+	row_name = XCALLOC(MTYPE_TTABLE, ncols * sizeof(char *));
+	orig = XSTRDUP(MTYPE_TTABLE, json_override_text);
+	res = orig;
+	while (res && col < ncols) {
+		section = strsep(&res, "|");
+		row_name[col] = XSTRDUP(MTYPE_TTABLE, section);
+		col++;
+	}
+	json = ttable_json_internal(tt, formats, (const char **)row_name);
+	for (j = 0; j < col; j++)
+		XFREE(MTYPE_TTABLE, row_name[j]);
+	XFREE(MTYPE_TTABLE, row_name);
+	XFREE(MTYPE_TTABLE, orig);
+	return json;
 }

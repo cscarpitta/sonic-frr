@@ -1,17 +1,6 @@
+// SPDX-License-Identifier: ISC
 /*
  * Copyright (c) 2015-16  David Lamparter, for NetDEF, Inc.
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #ifndef _FRR_MODULE_H
@@ -20,18 +9,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include "compiler.h"
+#include "xref.h"
+
 #ifdef __cplusplus
 extern "C" {
-#endif
-
-#if !defined(__GNUC__)
-#error module code needs GCC visibility extensions
-#elif __GNUC__ < 4
-#error module code needs GCC visibility extensions
-#else
-# define DSO_PUBLIC __attribute__ ((visibility ("default")))
-# define DSO_SELF   __attribute__ ((visibility ("protected")))
-# define DSO_LOCAL  __attribute__ ((visibility ("hidden")))
 #endif
 
 struct frrmod_runtime;
@@ -85,16 +67,23 @@ extern union _frrmod_runtime_u _frrmod_this_module;
 	DSO_LOCAL union _frrmod_runtime_u _frrmod_this_module = {{             \
 		NULL,                                                          \
 		&_frrmod_info,                                                 \
-	}};
+	}};                                                                    \
+	XREF_SETUP();                                                          \
+	MACRO_REQUIRE_SEMICOLON() /* end */
+
 #define FRR_MODULE_SETUP(...)                                                  \
-	FRR_COREMOD_SETUP(__VA_ARGS__)                                         \
-	DSO_SELF struct frrmod_runtime *frr_module = &_frrmod_this_module.r;
+	FRR_COREMOD_SETUP(__VA_ARGS__);                                        \
+	DSO_SELF struct frrmod_runtime *frr_module = &_frrmod_this_module.r;   \
+	MACRO_REQUIRE_SEMICOLON() /* end */
 
 extern struct frrmod_runtime *frrmod_list;
 
 extern void frrmod_init(struct frrmod_runtime *modinfo);
+extern void frrmod_terminate(void);
 extern struct frrmod_runtime *frrmod_load(const char *spec, const char *dir,
-					  char *err, size_t err_len);
+					  void (*pFerrlog)(const void *,
+							   const char *),
+					  const void *pErrlogCookie);
 #if 0
 /* not implemented yet */
 extern void frrmod_unload(struct frrmod_runtime *module);

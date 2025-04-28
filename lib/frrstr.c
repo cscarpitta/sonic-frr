@@ -1,31 +1,26 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * FRR string processing utilities.
  * Copyright (C) 2018  Cumulus Networks, Inc.
  *                     Quentin Young
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
+ * Copyright (c) 2023, LabN Consulting, L.L.C.
  */
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+#include "zebra.h"
 
 #include <string.h>
 #include <ctype.h>
 #include <sys/types.h>
+#ifdef HAVE_LIBPCRE2_POSIX
+#ifndef _FRR_PCRE2_POSIX
+#define _FRR_PCRE2_POSIX
+#include <pcre2posix.h>
+#endif /* _FRR_PCRE2_POSIX */
+#elif defined(HAVE_LIBPCREPOSIX)
+#include <pcreposix.h>
+#else
 #include <regex.h>
+#endif /* HAVE_LIBPCRE2_POSIX */
 
 #include "frrstr.h"
 #include "memory.h"
@@ -152,7 +147,33 @@ void frrstr_strvec_free(vector v)
 	vector_free(v);
 }
 
-bool begins_with(const char *str, const char *prefix)
+char *frrstr_replace(const char *str, const char *find, const char *replace)
+{
+	char *ch;
+	char *nustr = XSTRDUP(MTYPE_TMP, str);
+
+	size_t findlen = strlen(find);
+	size_t repllen = strlen(replace);
+
+	while ((ch = strstr(nustr, find))) {
+		if (repllen > findlen) {
+			size_t nusz = strlen(nustr) + repllen - findlen + 1;
+			nustr = XREALLOC(MTYPE_TMP, nustr, nusz);
+			ch = strstr(nustr, find);
+		}
+
+		size_t nustrlen = strlen(nustr);
+		size_t taillen = (nustr + nustrlen) - (ch + findlen);
+
+		memmove(ch + findlen + (repllen - findlen), ch + findlen,
+			taillen + 1);
+		memcpy(ch, replace, repllen);
+	}
+
+	return nustr;
+}
+
+bool frrstr_startswith(const char *str, const char *prefix)
 {
 	if (!str || !prefix)
 		return false;
@@ -166,10 +187,86 @@ bool begins_with(const char *str, const char *prefix)
 	return strncmp(str, prefix, lenprefix) == 0;
 }
 
+bool frrstr_endswith(const char *str, const char *suffix)
+{
+	if (!str || !suffix)
+		return false;
+
+	size_t lenstr = strlen(str);
+	size_t lensuffix = strlen(suffix);
+
+	if (lensuffix > lenstr)
+		return false;
+
+	return strncmp(&str[lenstr - lensuffix], suffix, lensuffix) == 0;
+}
+
 int all_digit(const char *str)
 {
 	for (; *str != '\0'; str++)
-		if (!isdigit((int)*str))
+		if (!isdigit((unsigned char)*str))
 			return 0;
 	return 1;
 }
+
+
+char *frrstr_hex(char *buff, size_t bufsiz, const uint8_t *str, size_t num)
+{
+	if (bufsiz == 0)
+		return buff;
+
+	char tmp[3];
+
+	buff[0] = '\0';
+
+	for (size_t i = 0; i < num; i++) {
+		snprintf(tmp, sizeof(tmp), "%02x", (unsigned char)str[i]);
+		strlcat(buff, tmp, bufsiz);
+	}
+
+	return buff;
+}
+
+const char *frrstr_skip_over_char(const char *s, int skipc)
+{
+	int c, quote = 0;
+
+	while ((c = *s++)) {
+		if (c == '\\') {
+			if (!*s++)
+				return NULL;
+			continue;
+		}
+		if (quote) {
+			if (c == quote)
+				quote = 0;
+			continue;
+		}
+		if (c == skipc)
+			return s;
+		if (c == '"' || c == '\'')
+			quote = c;
+	}
+	return NULL;
+}
+
+/*
+ * Advance backward in string until reaching the char `toc`
+ * if beginning of string is reached w/o finding char return NULL
+ *
+ * /foo/bar'baz/booz'/foo
+ */
+const char *frrstr_back_to_char(const char *s, int toc)
+{
+	const char *next = s;
+	const char *prev = NULL;
+
+	if (s[0] == 0)
+		return NULL;
+	if (!strpbrk(s, "'\"\\"))
+		return strrchr(s, toc);
+	while ((next = frrstr_skip_over_char(next, toc)))
+		prev = next - 1;
+	return prev;
+}
+

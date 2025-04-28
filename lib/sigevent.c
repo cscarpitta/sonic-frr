@@ -1,30 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Quagga signal handling functions.
  * Copyright (C) 2004 Paul Jakma,
- *
- * This file is part of Quagga.
- *
- * Quagga is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * Quagga is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
+
+#include <signal.h>
 #include <sigevent.h>
 #include <log.h>
 #include <memory.h>
 #include <lib_errors.h>
 
-#ifdef SA_SIGINFO
 #ifdef HAVE_UCONTEXT_H
 #ifdef GNU_LINUX
 /* get REG_EIP from ucontext.h */
@@ -34,14 +20,13 @@
 #endif /* GNU_LINUX */
 #include <ucontext.h>
 #endif /* HAVE_UCONTEXT_H */
-#endif /* SA_SIGINFO */
 
 
 /* master signals descriptor struct */
-static struct quagga_sigevent_master_t {
-	struct thread *t;
+static struct frr_sigevent_master_t {
+	struct event *t;
 
-	struct quagga_signal_t *signals;
+	struct frr_signal_t *signals;
 	int sigc;
 
 	volatile sig_atomic_t caught;
@@ -50,10 +35,10 @@ static struct quagga_sigevent_master_t {
 /* Generic signal handler
  * Schedules signal event thread
  */
-static void quagga_signal_handler(int signo)
+static void frr_signal_handler(int signo)
 {
 	int i;
-	struct quagga_signal_t *sig;
+	struct frr_signal_t *sig;
 
 	for (i = 0; i < sigmaster.sigc; i++) {
 		sig = &(sigmaster.signals[i]);
@@ -65,13 +50,40 @@ static void quagga_signal_handler(int signo)
 	sigmaster.caught = 1;
 }
 
-/* check if signals have been caught and run appropriate handlers */
-int quagga_sigevent_process(void)
+/*
+ * Check whether any signals have been received and are pending. This is done
+ * with the application's key signals blocked. The complete set of signals
+ * is returned in 'setp', so the caller can restore them when appropriate.
+ * If there are pending signals, returns 'true', 'false' otherwise.
+ */
+bool frr_sigevent_check(sigset_t *setp)
 {
-	struct quagga_signal_t *sig;
+	sigset_t blocked;
+	int i;
+	bool ret;
+
+	sigemptyset(setp);
+	sigemptyset(&blocked);
+
+	/* Set up mask of application's signals */
+	for (i = 0; i < sigmaster.sigc; i++)
+		sigaddset(&blocked, sigmaster.signals[i].signal);
+
+	pthread_sigmask(SIG_BLOCK, &blocked, setp);
+
+	/* Now that the application's signals are blocked, test. */
+	ret = (sigmaster.caught != 0);
+
+	return ret;
+}
+
+/* check if signals have been caught and run appropriate handlers */
+int frr_sigevent_process(void)
+{
+	struct frr_signal_t *sig;
 	int i;
 #ifdef SIGEVENT_BLOCK_SIGNALS
-	/* shouldnt need to block signals, but potentially may be needed */
+	/* shouldn't need to block signals, but potentially may be needed */
 	sigset_t newmask, oldmask;
 
 	/*
@@ -85,7 +97,7 @@ int quagga_sigevent_process(void)
 
 	if ((sigprocmask(SIG_BLOCK, &newmask, &oldmask)) < 0) {
 		flog_err_sys(EC_LIB_SYSTEM_CALL,
-			     "quagga_signal_timer: couldnt block signals!");
+			     "frr_signal_timer: couldnt block signals!");
 		return -1;
 	}
 #endif /* SIGEVENT_BLOCK_SIGNALS */
@@ -109,24 +121,23 @@ int quagga_sigevent_process(void)
 
 #ifdef SIGEVENT_BLOCK_SIGNALS
 	if (sigprocmask(SIG_UNBLOCK, &oldmask, NULL) < 0)
-		;
-	return -1;
+		return -1;
 #endif /* SIGEVENT_BLOCK_SIGNALS */
 
 	return 0;
 }
 
 #ifdef SIGEVENT_SCHEDULE_THREAD
-/* timer thread to check signals. Shouldnt be needed */
-int quagga_signal_timer(struct thread *t)
+/* timer thread to check signals. shouldn't be needed */
+void frr_signal_timer(struct event *t)
 {
-	struct quagga_sigevent_master_t *sigm;
+	struct frr_sigevent_master_t *sigm;
 
-	sigm = THREAD_ARG(t);
+	sigm = EVENT_ARG(t);
 	sigm->t = NULL;
-	thread_add_timer(sigm->t->master, quagga_signal_timer, &sigmaster,
-			 QUAGGA_SIGNAL_TIMER_INTERVAL, &sigm->t);
-	return quagga_sigevent_process();
+	event_add_timer(sigm->t->master, frr_signal_timer, &sigmaster,
+			FRR_SIGNAL_TIMER_INTERVAL, &sigm->t);
+	frr_sigevent_process();
 }
 #endif /* SIGEVENT_SCHEDULE_THREAD */
 
@@ -138,7 +149,7 @@ static int signal_set(int signo)
 	struct sigaction sig;
 	struct sigaction osig;
 
-	sig.sa_handler = &quagga_signal_handler;
+	sig.sa_handler = &frr_signal_handler;
 	sigfillset(&sig.sa_mask);
 	sig.sa_flags = 0;
 	if (signo == SIGALRM) {
@@ -158,8 +169,6 @@ static int signal_set(int signo)
 		return 0;
 }
 
-#ifdef SA_SIGINFO
-
 /* XXX This function should be enhanced to support more platforms
        (it currently works only on Linux/x86). */
 static void *program_counter(void *context)
@@ -174,8 +183,6 @@ static void *program_counter(void *context)
 #elif defined(__powerpc__)
 #  define REG_INDEX 32
 #endif
-#elif defined(SUNOS_5) /* !GNU_LINUX */
-# define REG_INDEX REG_PC
 #endif		       /* GNU_LINUX */
 
 #ifdef REG_INDEX
@@ -199,60 +206,77 @@ static void *program_counter(void *context)
 	return NULL;
 }
 
-#endif /* SA_SIGINFO */
-
 static void __attribute__((noreturn))
-exit_handler(int signo
-#ifdef SA_SIGINFO
-	     ,
-	     siginfo_t *siginfo, void *context
-#endif
-	     )
+exit_handler(int signo, siginfo_t *siginfo, void *context)
 {
-	zlog_signal(signo, "exiting..."
-#ifdef SA_SIGINFO
-		    ,
-		    siginfo, program_counter(context)
-#endif
-			    );
+	void *pc = program_counter(context);
+
+	zlog_signal(signo, "exiting...", siginfo, pc);
 	_exit(128 + signo);
 }
 
 static void __attribute__((noreturn))
-core_handler(int signo
-#ifdef SA_SIGINFO
-	     ,
-	     siginfo_t *siginfo, void *context
-#endif
-	     )
+core_handler(int signo, siginfo_t *siginfo, void *context)
 {
+	void *pc = program_counter(context);
+
 	/* make sure we don't hang in here.  default for SIGALRM is terminate.
 	 * - if we're in backtrace for more than a second, abort. */
 	struct sigaction sa_default = {.sa_handler = SIG_DFL};
+
 	sigaction(SIGALRM, &sa_default, NULL);
+	sigaction(signo, &sa_default, NULL);
 
 	sigset_t sigset;
+
 	sigemptyset(&sigset);
 	sigaddset(&sigset, SIGALRM);
 	sigprocmask(SIG_UNBLOCK, &sigset, NULL);
 
 	alarm(1);
 
-	zlog_signal(signo, "aborting..."
-#ifdef SA_SIGINFO
-		    ,
-		    siginfo, program_counter(context)
-#endif
-			    );
-	/* dump memory stats on core */
-	log_memstats(stderr, "core_handler");
-	abort();
+	zlog_signal(signo, "aborting...", siginfo, pc);
+
+	/* there used to be a log_memstats() call here, to dump MTYPE counters
+	 * on a coredump.  This is not possible since log_memstats is not
+	 * AS-Safe, as it calls fopen(), fprintf(), and cousins.  This can
+	 * lead to a deadlock depending on where we crashed - very much not a
+	 * good thing if the process just hangs there after a crash.
+	 *
+	 * The alarm(1) above tries to alleviate this, but that's really a
+	 * last resort recovery.  Stick with AS-safe calls here.
+	 *
+	 * If the fprintf() calls are removed from log_memstats(), this can be
+	 * added back in, since writing to log with zlog_sigsafe() is AS-safe.
+	 */
+
+	/*
+	 * This is a buffer flush because FRR is going down
+	 * hard.  This is especially important if the crash
+	 * was caused by a memory operation and if we call
+	 * zlog_tls_buffer_fini() then it has memory
+	 * operations as well.  This will cause the
+	 * core dump to not happen.  BAD MOJO
+	 * So this is intentional, let's try to flush
+	 * what we can and let the crash happen.
+	 */
+	zlog_tls_buffer_flush();
+
+	/* give the kernel a chance to generate a coredump */
+	sigaddset(&sigset, signo);
+	sigprocmask(SIG_UNBLOCK, &sigset, NULL);
+	raise(signo);
+
+	/* only chance to end up here is if the default action for signo is
+	 * something other than kill or coredump the process
+	 */
+	_exit(128 + signo);
 }
 
 static void trap_default_signals(void)
 {
 	static const int core_signals[] = {
-		SIGQUIT, SIGILL,
+		SIGQUIT, SIGILL, SIGABRT,
 #ifdef SIGEMT
 		SIGEMT,
 #endif
@@ -285,12 +309,7 @@ static void trap_default_signals(void)
 	static const struct {
 		const int *sigs;
 		unsigned int nsigs;
-		void (*handler)(int signo
-#ifdef SA_SIGINFO
-				,
-				siginfo_t *info, void *context
-#endif
-				);
+		void (*handler)(int signo, siginfo_t *info, void *context);
 	} sigmap[] = {
 		{core_signals, array_size(core_signals), core_handler},
 		{exit_signals, array_size(exit_signals), exit_handler},
@@ -311,15 +330,10 @@ static void trap_default_signals(void)
 					act.sa_handler = SIG_IGN;
 					act.sa_flags = 0;
 				} else {
-#ifdef SA_SIGINFO
 					/* Request extra arguments to signal
 					 * handler. */
 					act.sa_sigaction = sigmap[i].handler;
 					act.sa_flags = SA_SIGINFO;
-#else
-					act.sa_handler = sigmap[i].handler;
-					act.sa_flags = 0;
-#endif
 #ifdef SA_RESETHAND
 					/* don't try to print backtraces
 					 * recursively */
@@ -339,12 +353,11 @@ static void trap_default_signals(void)
 	}
 }
 
-void signal_init(struct thread_master *m, int sigc,
-		 struct quagga_signal_t signals[])
+void signal_init(struct event_loop *m, int sigc, struct frr_signal_t signals[])
 {
 
 	int i = 0;
-	struct quagga_signal_t *sig;
+	struct frr_signal_t *sig;
 
 	/* First establish some default handlers that can be overridden by
 	   the application. */
@@ -362,7 +375,7 @@ void signal_init(struct thread_master *m, int sigc,
 
 #ifdef SIGEVENT_SCHEDULE_THREAD
 	sigmaster.t = NULL;
-	thread_add_timer(m, quagga_signal_timer, &sigmaster,
-			 QUAGGA_SIGNAL_TIMER_INTERVAL, &sigmaster.t);
+	event_add_timer(m, frr_signal_timer, &sigmaster,
+			FRR_SIGNAL_TIMER_INTERVAL, &sigmaster.t);
 #endif /* SIGEVENT_SCHEDULE_THREAD */
 }

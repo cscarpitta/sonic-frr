@@ -47,11 +47,11 @@ Build apk packages
 
    ./docker/alpine/build.sh
 
-This will put the apk packages in:
+This will put the apk packages into the architecture folder in:
 
 ::
 
-   ./docker/pkgs/apk/x86_64/
+   ./docker/alpine/pkgs/apk/
 
 Usage
 -----
@@ -85,8 +85,6 @@ startup.  To configure by hand:
 
    docker exec -it frr /bin/sh
    vi /etc/frr/daemons
-   cp /etc/frr/zebra.conf.sample /etc/frr/zebra.conf
-   vi /etc/frr/zebra.conf
    /etc/init.d/frr start
 
 Or, to configure the daemons using /etc/frr from a host volume, put the

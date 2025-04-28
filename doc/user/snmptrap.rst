@@ -4,8 +4,9 @@ Handling SNMP Traps
 To handle snmp traps make sure your snmp setup of frr works correctly as
 described in the frr documentation in :ref:`snmp-support`.
 
-The BGP4 mib will send traps on peer up/down events. These should be visible in
-your snmp logs with a message similar to:
+BGP handles both :rfc:`4273` and [Draft-IETF-idr-bgp4-mibv2-11]_ MIBs.
+The BGP4 MIBs will send traps on peer up/down events. These should be
+visible in your snmp logs with a message similar to:
 
 ::
 
@@ -155,13 +156,13 @@ a siren, have your display flash, etc., be creative ;).
    error="Cease"
    case "$suberrorcode" in
    01) suberror="Maximum Number of Prefixes Reached" ;;
-   02) suberror="Administratively Shutdown" ;;
-   03) suberror="Peer Unconfigured" ;;
-   04) suberror="Administratively Reset" ;;
+   02) suberror="Administrative Shutdown" ;;
+   03) suberror="Peer De-configured" ;;
+   04) suberror="Administrative Reset" ;;
    05) suberror="Connection Rejected" ;;
    06) suberror="Other Configuration Change" ;;
-   07) suberror="Connection collision resolution" ;;
-   08) suberror="Out of Resource" ;;
+   07) suberror="Connection Collision Resolution" ;;
+   08) suberror="Out of Resources" ;;
    09) suberror="MAX" ;;
    *) suberror="Unknown" ;;
    esac
@@ -199,3 +200,24 @@ a siren, have your display flash, etc., be creative ;).
 
    # mail the notification
    echo "$MAIL" | mail -s "$SUBJECT" $EMAILADDR
+
+.. _traps-mib-selection:
+
+Traps Mib Selection in BGP
+--------------------------
+
+Both :rfc:`4273` and [Draft-IETF-idr-bgp4-mibv2-11]_ MIBs define traps for
+dealing with up/down events and state transition. The user has the
+possibility to select the MIB he wants to receive traps from:
+
+.. clicmd:: bgp snmp traps <rfc4273|bgp4-mibv2>
+
+By default, only rfc4273 traps are enabled and sent.
+
+.. [Draft-IETF-idr-bgp4-mibv2-11] <https://tools.ietf.org/id/draft-ietf-idr-bgp4-mibv2-11.txt>
+
+The :rfc:`4382` also defines traps to inform when an L3VPN network changes
+the operational status of its VRF interface. The user can choose to suppress
+those traps or not.
+
+.. clicmd:: bgp snmp traps rfc4382

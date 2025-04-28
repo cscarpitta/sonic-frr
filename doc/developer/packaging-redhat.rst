@@ -3,7 +3,7 @@
 Packaging Red Hat
 =================
 
-Tested on CentOS 6, CentOS 7 and Fedora 24.
+Tested on CentOS 6, CentOS 7, Rocky 8 and Fedora 24.
 
 1. On CentOS 6, refer to :ref:`building-centos6` for details on installing
    sufficiently up-to-date package versions to enable building FRR.
@@ -18,21 +18,33 @@ Tested on CentOS 6, CentOS 7 and Fedora 24.
 
       yum install rpm-build net-snmp-devel pam-devel libcap-devel
 
-   If your platform uses systemd::
+   For CentOS 7 and Rocky 8, the package will be built using python3
+   and requires additional python3 packages::
 
-      yum install systemd-devel
+       yum install python3-devel python3-sphinx
+
+   .. note::
+
+     For Rocky 8 you need to install ``platform-python-devel`` package
+     to provide ``/usr/bin/pathfix.py``::
+
+       yum install platform-python-devel
+
 
    If ``yum`` is not present on your system, use ``dnf`` instead.
 
-3. Checkout FRR::
+   You should enable ``PowerTools`` repo if using Rocky 8 which
+   is disabled by default.
+
+4. Checkout FRR::
 
       git clone https://github.com/frrouting/frr.git frr
 
-4. Run Bootstrap and make distribution tar.gz::
+5. Run Bootstrap and make distribution tar.gz::
 
       cd frr
       ./bootstrap.sh
-      ./configure --with-pkg-extra-version=-MyRPMVersion SPHINXBUILD=sphinx-build2.7
+      ./configure --with-pkg-extra-version=-MyRPMVersion
       make dist
 
    .. note::
@@ -40,7 +52,7 @@ Tested on CentOS 6, CentOS 7 and Fedora 24.
       The only ``configure`` option respected when building RPMs is
       ``--with-pkg-extra-version``.
 
-5. Create RPM directory structure and populate with sources::
+6. Create RPM directory structure and populate with sources::
 
      mkdir rpmbuild
      mkdir rpmbuild/SOURCES
@@ -48,34 +60,45 @@ Tested on CentOS 6, CentOS 7 and Fedora 24.
      cp redhat/*.spec rpmbuild/SPECS/
      cp frr*.tar.gz rpmbuild/SOURCES/
 
-6. Edit :file:`rpm/SPECS/frr.spec` with configuration as needed.
+7. Edit :file:`rpm/SPECS/frr.spec` with configuration as needed.
 
    Look at the beginning of the file and adjust the following parameters to
    enable or disable features as required::
 
       ############### FRRouting (FRR) configure options #################
       # with-feature options
-      %{!?with_pam:           %global  with_pam           0 }
-      %{!?with_ospfclient:    %global  with_ospfclient    1 }
-      %{!?with_ospfapi:       %global  with_ospfapi       1 }
-      %{!?with_irdp:          %global  with_irdp          1 }
-      %{!?with_rtadv:         %global  with_rtadv         1 }
-      %{!?with_ldpd:          %global  with_ldpd          1 }
-      %{!?with_nhrpd:         %global  with_nhrpd         1 }
-      %{!?with_eigrp:         %global  with_eigrpd        1 }
-      %{!?with_shared:        %global  with_shared        1 }
-      %{!?with_multipath:     %global  with_multipath     256 }
-      %{!?frr_user:           %global  frr_user           frr }
-      %{!?vty_group:          %global  vty_group          frrvty }
-      %{!?with_fpm:           %global  with_fpm           0 }
-      %{!?with_watchfrr:      %global  with_watchfrr      1 }
+      %{!?with_babeld:        %global  with_babeld        1 }
+      %{!?with_bfdd:          %global  with_bfdd          1 }
       %{!?with_bgp_vnc:       %global  with_bgp_vnc       0 }
+      %{!?with_cumulus:       %global  with_cumulus       0 }
+      %{!?with_eigrpd:        %global  with_eigrpd        1 }
+      %{!?with_fpm:           %global  with_fpm           1 }
+      %{!?with_mgmtd_test_be_client: %global with_mgmtd_test_be_client 0 }
+      %{!?with_ldpd:          %global  with_ldpd          1 }
+      %{!?with_multipath:     %global  with_multipath     256 }
+      %{!?with_nhrpd:         %global  with_nhrpd         1 }
+      %{!?with_ospfapi:       %global  with_ospfapi       1 }
+      %{!?with_ospfclient:    %global  with_ospfclient    1 }
+      %{!?with_pam:           %global  with_pam           0 }
+      %{!?with_pbrd:          %global  with_pbrd          1 }
       %{!?with_pimd:          %global  with_pimd          1 }
-      %{!?with_rpki:          %global  with_rpki          0 }
+      %{!?with_pim6d:         %global  with_pim6d         1 }
+      %{!?with_vrrpd:         %global  with_vrrpd         1 }
+      %{!?with_rtadv:         %global  with_rtadv         1 }
+      %{!?with_watchfrr:      %global  with_watchfrr      1 }
+      %{!?with_pathd:         %global  with_pathd         1 }
+      %{!?with_grpc:          %global  with_grpc          0 }
+      %{!?with_rpki:          %global  with_rpki          1 }
+      %{!?with_docs:          %global  with_docs          1 }
 
-7. Build the RPM::
+8. Build the RPM::
 
       rpmbuild --define "_topdir `pwd`/rpmbuild" -ba rpmbuild/SPECS/frr.spec
+
+   To override :file:`rpm/SPECS/frr.spec` defaults on the rpmbuild
+   commandline with:
+
+      rpmbuild --define 'variable value'
 
    If building with RPKI, then download and install the additional RPKI
    packages from

@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Debugging utilities.
  * Copyright (C) 2018  Cumulus Networks, Inc.
  * Quentin Young
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 #ifndef _FRRDEBUG_H
 #define _FRRDEBUG_H
@@ -47,6 +34,7 @@ extern "C" {
 #define DEBUG_OPT_NONE 0x00000000
 
 
+PREDECL_LIST(debug_list);
 /*
  * Debugging record.
  *
@@ -76,31 +64,18 @@ extern "C" {
  *    manipulate the flags field in a multithreaded environment results in
  *    undefined behavior.
  *
+ * conf
+ *    The configuration string that will be written to the config file.
+ *
  * desc
  *    Human-readable description of this debugging record.
  */
 struct debug {
 	atomic_uint_fast32_t flags;
+	const char *conf;
 	const char *desc;
-};
 
-/*
- * Callback set for debugging code.
- *
- * debug_set_all
- *    Function pointer to call when the user requests that all debugs have a
- *    mode set.
- */
-struct debug_callbacks {
-	/*
-	 * flags
-	 *    flags to set on debug flag fields
-	 *
-	 * set
-	 *    true: set flags
-	 *    false: unset flags
-	 */
-	void (*debug_set_all)(uint32_t flags, bool set);
+	struct debug_list_item item;
 };
 
 /*
@@ -224,16 +199,19 @@ struct debug_callbacks {
 #define DEBUGN(name, fmt, ...) DEBUG(notice, name, fmt, ##__VA_ARGS__)
 #define DEBUGD(name, fmt, ...) DEBUG(debug, name, fmt, ##__VA_ARGS__)
 
+/* Show current debugging status. */
+void debug_status_write(struct vty *vty);
+
 /*
- * Optional initializer for debugging. Highly recommended.
- *
- * This function installs common debugging commands and allows the caller to
- * specify callbacks to take when these commands are issued, allowing the
- * caller to respond to events such as a request to turn off all debugs.
- *
- * MT-Safe
+ * Register a debug item.
  */
-void debug_init(const struct debug_callbacks *cb);
+void debug_install(struct debug *debug);
+
+/*
+ * Initialize debugging.
+ * Should only be called by libfrr.
+ */
+void debug_init(void);
 
 #ifdef __cplusplus
 }

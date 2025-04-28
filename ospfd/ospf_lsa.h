@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * OSPF Link State Advertisement
  * Copyright (C) 1999, 2000 Toshiaki Takada
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #ifndef _ZEBRA_OSPF_LSA_H
@@ -60,6 +45,7 @@
 /* OSPF LSA header. */
 struct lsa_header {
 	uint16_t ls_age;
+#define DO_NOT_AGE 0x8000
 	uint8_t options;
 	uint8_t type;
 	struct in_addr id;
@@ -84,8 +70,9 @@ struct ospf_lsa {
 #define OSPF_LSA_PREMATURE_AGE	  0x40
 #define OSPF_LSA_IN_MAXAGE	  0x80
 
-	/* LSA data. */
+	/* LSA data. and size */
 	struct lsa_header *data;
+	size_t size;
 
 	/* Received time stamp. */
 	struct timeval tv_recv;
@@ -119,6 +106,12 @@ struct ospf_lsa {
 
 	/* VRF Id */
 	vrf_id_t vrf_id;
+
+	/*For topo chg detection in HELPER role*/
+	bool to_be_acknowledged;
+
+	/* send maxage with no data */
+	bool opaque_zero_len_delete;
 };
 
 /* OSPF LSA Link Type. */
@@ -165,7 +158,7 @@ struct router_lsa {
 	uint8_t flags;
 	uint8_t zero;
 	uint16_t links;
-	struct {
+	struct router_link {
 		struct in_addr link_id;
 		struct in_addr link_data;
 		uint8_t type;
@@ -196,13 +189,15 @@ struct summary_lsa {
 struct as_external_lsa {
 	struct lsa_header header;
 	struct in_addr mask;
-	struct {
+	struct as_route {
 		uint8_t tos;
 		uint8_t metric[3];
 		struct in_addr fwd_addr;
 		uint32_t route_tag;
 	} e[1];
 };
+
+enum lsid_status { LSID_AVAILABLE = 0, LSID_CHANGE, LSID_NOT_AVAILABLE };
 
 #include "ospfd/ospf_opaque.h"
 
@@ -214,124 +209,158 @@ struct as_external_lsa {
 #define LS_AGE(x) (OSPF_LSA_MAXAGE < get_age(x) ? OSPF_LSA_MAXAGE : get_age(x))
 #define IS_LSA_SELF(L)          (CHECK_FLAG ((L)->flags, OSPF_LSA_SELF))
 #define IS_LSA_MAXAGE(L)        (LS_AGE ((L)) == OSPF_LSA_MAXAGE)
+#define IS_LSA_MAX_SEQ(L)                                                      \
+	((L)->data->ls_seqnum == htonl(OSPF_MAX_SEQUENCE_NUMBER))
 
 #define OSPF_LSA_UPDATE_DELAY		2
 
-#define OSPF_LSA_UPDATE_TIMER_ON(T, F)                                         \
-	if (!(T))                                                              \
-	(T) = thread_add_timer(master, (F), 0, 2)
+#define CHECK_LSA_TYPE_1_TO_5_OR_7(type)                                       \
+	((type == OSPF_ROUTER_LSA) || (type == OSPF_NETWORK_LSA)               \
+	 || (type == OSPF_SUMMARY_LSA) || (type == OSPF_ASBR_SUMMARY_LSA)      \
+	 || (type == OSPF_AS_EXTERNAL_LSA) || (type == OSPF_AS_NSSA_LSA))
+
+#define OSPF_FR_CONFIG(o, a)                                                   \
+	(o->fr_configured || ((a != NULL) ? a->fr_info.configured : 0))
 
 /* Prototypes. */
 /* XXX: Eek, time functions, similar are in lib/thread.c */
 extern struct timeval int2tv(int);
-extern struct timeval msec2tv(int);
 
-extern int get_age(struct ospf_lsa *);
-extern uint16_t ospf_lsa_checksum(struct lsa_header *);
-extern int ospf_lsa_checksum_valid(struct lsa_header *);
-extern int ospf_lsa_refresh_delay(struct ospf_lsa *);
+extern struct timeval msec2tv(int a);
+extern int tv2msec(struct timeval tv);
 
-extern const char *dump_lsa_key(struct ospf_lsa *);
-extern uint32_t lsa_seqnum_increment(struct ospf_lsa *);
-extern void lsa_header_set(struct stream *, uint8_t, uint8_t, struct in_addr,
-			   struct in_addr);
-extern struct ospf_neighbor *ospf_nbr_lookup_ptop(struct ospf_interface *);
-extern int ospf_check_nbr_status(struct ospf *);
+extern int get_age(struct ospf_lsa *lsa);
+extern uint16_t ospf_lsa_checksum(struct lsa_header *lsah);
+extern int ospf_lsa_checksum_valid(struct lsa_header *lsah);
+extern int ospf_lsa_refresh_delay(struct ospf *ospf, struct ospf_lsa *lsa);
+
+extern const char *dump_lsa_key(struct ospf_lsa *lsa);
+extern uint32_t lsa_seqnum_increment(struct ospf_lsa *lsa);
+extern void lsa_header_set(struct stream *s, uint8_t options, uint8_t type, struct in_addr id,
+			   struct in_addr router_id);
+extern struct ospf_neighbor *ospf_nbr_lookup_ptop(struct ospf_interface *oi);
+extern int ospf_check_nbr_status(struct ospf *ospf);
 
 /* Prototype for LSA primitive. */
 extern struct ospf_lsa *ospf_lsa_new(void);
 extern struct ospf_lsa *ospf_lsa_new_and_data(size_t size);
-extern struct ospf_lsa *ospf_lsa_dup(struct ospf_lsa *);
-extern void ospf_lsa_free(struct ospf_lsa *);
-extern struct ospf_lsa *ospf_lsa_lock(struct ospf_lsa *);
-extern void ospf_lsa_unlock(struct ospf_lsa **);
-extern void ospf_lsa_discard(struct ospf_lsa *);
-extern int ospf_lsa_flush_schedule(struct ospf *, struct ospf_lsa *);
-extern struct lsa_header *ospf_lsa_data_new(size_t);
-extern struct lsa_header *ospf_lsa_data_dup(struct lsa_header *);
-extern void ospf_lsa_data_free(struct lsa_header *);
+extern struct ospf_lsa *ospf_lsa_dup(struct ospf_lsa *lsa);
+extern void ospf_lsa_free(struct ospf_lsa *lsa);
+extern struct ospf_lsa *ospf_lsa_lock(struct ospf_lsa *lsa);
+extern void ospf_lsa_unlock(struct ospf_lsa **lsa);
+extern void ospf_lsa_discard(struct ospf_lsa *lsa);
+extern int ospf_lsa_flush_schedule(struct ospf *ospf, struct ospf_lsa *lsa);
+extern struct lsa_header *ospf_lsa_data_new(size_t size);
+extern struct lsa_header *ospf_lsa_data_dup(struct lsa_header *lsah);
+extern void ospf_lsa_data_free(struct lsa_header *lsah);
 
 /* Prototype for various LSAs */
-extern int ospf_router_lsa_update(struct ospf *);
-extern int ospf_router_lsa_update_area(struct ospf_area *);
+extern void ospf_router_lsa_body_set(struct stream **s, struct ospf_area *area);
+extern uint8_t router_lsa_flags(struct ospf_area *area);
+extern int ospf_router_lsa_update(struct ospf *ospf);
+extern int ospf_router_lsa_update_area(struct ospf_area *area);
 
-extern void ospf_network_lsa_update(struct ospf_interface *);
+extern void ospf_network_lsa_update(struct ospf_interface *oi);
 
-extern struct ospf_lsa *
-ospf_summary_lsa_originate(struct prefix_ipv4 *, uint32_t, struct ospf_area *);
-extern struct ospf_lsa *ospf_summary_asbr_lsa_originate(struct prefix_ipv4 *,
-							uint32_t,
-							struct ospf_area *);
+extern struct ospf_lsa *ospf_summary_lsa_originate(struct prefix_ipv4 *p, uint32_t metric,
+						   struct ospf_area *area);
+extern struct ospf_lsa *ospf_summary_asbr_lsa_originate(struct prefix_ipv4 *p, uint32_t metric,
+							struct ospf_area *area);
 
-extern struct ospf_lsa *ospf_lsa_install(struct ospf *, struct ospf_interface *,
-					 struct ospf_lsa *);
+extern struct ospf_lsa *ospf_lsa_install(struct ospf *ospf, struct ospf_interface *oi,
+					 struct ospf_lsa *lsa);
 
 extern void ospf_nssa_lsa_flush(struct ospf *ospf, struct prefix_ipv4 *p);
-extern void ospf_external_lsa_flush(struct ospf *, uint8_t,
-				    struct prefix_ipv4 *,
+extern void ospf_external_lsa_flush(struct ospf *ospf, uint8_t type, struct prefix_ipv4 *p,
 				    ifindex_t /* , struct in_addr nexthop */);
 
-extern struct in_addr ospf_get_ip_from_ifp(struct ospf_interface *);
+extern struct in_addr ospf_get_ip_from_ifp(struct ospf_interface *oi);
 
-extern struct ospf_lsa *ospf_external_lsa_originate(struct ospf *,
-						    struct external_info *);
-extern int ospf_external_lsa_originate_timer(struct thread *);
-extern int ospf_default_originate_timer(struct thread *);
-extern struct ospf_lsa *ospf_lsa_lookup(struct ospf *ospf, struct ospf_area *,
-					uint32_t, struct in_addr,
-					struct in_addr);
-extern struct ospf_lsa *ospf_lsa_lookup_by_id(struct ospf_area *, uint32_t,
-					      struct in_addr);
-extern struct ospf_lsa *ospf_lsa_lookup_by_header(struct ospf_area *,
-						  struct lsa_header *);
-extern int ospf_lsa_more_recent(struct ospf_lsa *, struct ospf_lsa *);
-extern int ospf_lsa_different(struct ospf_lsa *, struct ospf_lsa *);
-extern void ospf_flush_self_originated_lsas_now(struct ospf *);
+extern struct ospf_lsa *ospf_external_lsa_originate(struct ospf *ospf, struct external_info *ei);
+extern struct ospf_lsa *ospf_nssa_lsa_originate(struct ospf_area *area,
+						struct external_info *ei);
+extern struct ospf_lsa *ospf_nssa_lsa_refresh(struct ospf_area *area,
+					      struct ospf_lsa *lsa,
+					      struct external_info *ei);
+extern void ospf_external_lsa_rid_change(struct ospf *ospf);
+extern struct ospf_lsa *ospf_lsa_lookup(struct ospf *ospf, struct ospf_area *area, uint32_t type,
+					struct in_addr id, struct in_addr adv_router);
+extern struct ospf_lsa *ospf_lsa_lookup_by_id(struct ospf_area *area, uint32_t type,
+					      struct in_addr id);
+extern struct ospf_lsa *ospf_lsa_lookup_by_header(struct ospf_area *area, struct lsa_header *lsah);
+extern int ospf_lsa_more_recent(struct ospf_lsa *l1, struct ospf_lsa *l2);
+extern int ospf_lsa_different(struct ospf_lsa *l1, struct ospf_lsa *l2, bool ignore_rcvd_flag);
+extern void ospf_flush_self_originated_lsas_now(struct ospf *ospf);
 
-extern int ospf_lsa_is_self_originated(struct ospf *, struct ospf_lsa *);
+extern int ospf_lsa_is_self_originated(struct ospf *ospf, struct ospf_lsa *lsa);
 
-extern struct ospf_lsa *ospf_lsa_lookup_by_prefix(struct ospf_lsdb *, uint8_t,
-						  struct prefix_ipv4 *,
-						  struct in_addr);
+extern struct ospf_lsa *ospf_lsa_lookup_by_prefix(struct ospf_lsdb *lsdb, uint8_t type,
+						  struct prefix_ipv4 *p, struct in_addr router_id);
 
-extern void ospf_lsa_maxage(struct ospf *, struct ospf_lsa *);
-extern uint32_t get_metric(uint8_t *);
+extern void ospf_lsa_maxage(struct ospf *ospf, struct ospf_lsa *lsa);
+extern uint32_t get_metric(uint8_t *metric);
 
-extern int ospf_lsa_maxage_walker(struct thread *);
-extern struct ospf_lsa *ospf_lsa_refresh(struct ospf *, struct ospf_lsa *);
+extern void ospf_lsa_maxage_walker(struct event *event);
+extern struct ospf_lsa *ospf_lsa_refresh(struct ospf *ospf, struct ospf_lsa *lsa);
 
-extern void ospf_external_lsa_refresh_default(struct ospf *);
-extern void ospf_default_originate_lsa_update(struct ospf *ospf);
+extern void ospf_external_lsa_refresh_default(struct ospf *ospf);
 
-extern void ospf_external_lsa_refresh_type(struct ospf *, uint8_t,
-					   unsigned short, int);
-extern struct ospf_lsa *ospf_external_lsa_refresh(struct ospf *,
-						  struct ospf_lsa *,
-						  struct external_info *, int);
-extern struct in_addr ospf_lsa_unique_id(struct ospf *, struct ospf_lsdb *,
-					 uint8_t, struct prefix_ipv4 *);
-extern void ospf_schedule_lsa_flood_area(struct ospf_area *, struct ospf_lsa *);
-extern void ospf_schedule_lsa_flush_area(struct ospf_area *, struct ospf_lsa *);
+extern void ospf_external_lsa_refresh_type(struct ospf *ospf, uint8_t type, uint8_t instance,
+					   int force);
+extern struct ospf_lsa *ospf_external_lsa_refresh(struct ospf *ospf, struct ospf_lsa *lsa,
+						  struct external_info *ei, int force, bool aggr);
+extern enum lsid_status ospf_lsa_unique_id(struct ospf *ospf,
+					   struct ospf_lsdb *lsdb,
+					   uint8_t type, struct prefix_ipv4 *p,
+					   struct in_addr *addr);
+extern void ospf_schedule_lsa_flood_area(struct ospf_area *area, struct ospf_lsa *lsa);
+extern void ospf_schedule_lsa_flush_area(struct ospf_area *area, struct ospf_lsa *lsa);
 
-extern void ospf_refresher_register_lsa(struct ospf *, struct ospf_lsa *);
-extern void ospf_refresher_unregister_lsa(struct ospf *, struct ospf_lsa *);
-extern int ospf_lsa_refresh_walker(struct thread *);
+extern void ospf_refresher_register_lsa(struct ospf *ospf, struct ospf_lsa *lsa);
+extern void ospf_refresher_unregister_lsa(struct ospf *ospf, struct ospf_lsa *lsa);
+extern void ospf_lsa_refresh_walker(struct event *event);
 
-extern void ospf_lsa_maxage_delete(struct ospf *, struct ospf_lsa *);
+extern void ospf_lsa_maxage_delete(struct ospf *ospf, struct ospf_lsa *lsa);
 
-extern void ospf_discard_from_db(struct ospf *, struct ospf_lsdb *,
-				 struct ospf_lsa *);
-extern int is_prefix_default(struct prefix_ipv4 *);
+extern void ospf_discard_from_db(struct ospf *ospf, struct ospf_lsdb *lsdb, struct ospf_lsa *lsa);
 
-extern int metric_type(struct ospf *, uint8_t, unsigned short);
-extern int metric_value(struct ospf *, uint8_t, unsigned short);
+extern int metric_type(struct ospf *ospf, uint8_t src, unsigned short instance);
+extern int metric_value(struct ospf *ospf, uint8_t src, unsigned short instance);
 
-extern struct in_addr ospf_get_nssa_ip(struct ospf_area *);
-extern int ospf_translated_nssa_compare(struct ospf_lsa *, struct ospf_lsa *);
-extern struct ospf_lsa *ospf_translated_nssa_refresh(struct ospf *,
-						     struct ospf_lsa *,
-						     struct ospf_lsa *);
-extern struct ospf_lsa *ospf_translated_nssa_originate(struct ospf *,
-						       struct ospf_lsa *);
+extern char link_info_set(struct stream **s, struct in_addr id,
+			  struct in_addr data, uint8_t type, uint8_t tos,
+			  uint16_t cost);
 
+extern struct in_addr ospf_get_nssa_ip(struct ospf_area *area);
+extern struct ospf_lsa *ospf_translated_nssa_refresh(struct ospf *ospf,
+						     struct ospf_lsa *type7,
+						     struct ospf_lsa *type5);
+extern struct ospf_lsa *ospf_translated_nssa_originate(struct ospf *ospf,
+						       struct ospf_lsa *type7,
+						       struct ospf_lsa *type5);
+extern void ospf_check_and_gen_init_seq_lsa(struct ospf_interface *oi,
+					    struct ospf_lsa *lsa);
+extern void ospf_flush_lsa_from_area(struct ospf *ospf, struct in_addr area_id,
+				     int type);
+extern void ospf_maxage_lsa_remover(struct event *event);
+extern bool ospf_check_dna_lsa(const struct ospf_lsa *lsa);
+extern void ospf_refresh_area_self_lsas(struct ospf_area *area);
+
+/** @brief Check if the LSA is an indication LSA.
+ *  @param lsa pointer.
+ *  @return true or false based on lsa info.
+ */
+static inline bool ospf_check_indication_lsa(struct ospf_lsa *lsa)
+{
+	struct summary_lsa *sl = NULL;
+
+	if (lsa->data->type == OSPF_ASBR_SUMMARY_LSA) {
+		sl = (struct summary_lsa *)lsa->data;
+		if ((GET_METRIC(sl->metric) == OSPF_LS_INFINITY) &&
+		    !CHECK_FLAG(lsa->data->options, OSPF_OPTION_DC))
+			return true;
+	}
+
+	return false;
+}
 #endif /* _ZEBRA_OSPF_LSA_H */

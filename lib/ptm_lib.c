@@ -1,26 +1,9 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* PTM Library
  * Copyright (C) 2015 Cumulus Networks, Inc.
- *
- * This file is part of Quagga.
- *
- * Quagga is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * Quagga is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
-#ifdef HAVE_CONFIG_H
-#include "config.h"
-#endif
+#include <zebra.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -65,10 +48,10 @@ static csv_record_t *_ptm_lib_encode_header(csv_t *csv, csv_record_t *rec,
 	char client_buf[32];
 	csv_record_t *rec1;
 
-	sprintf(msglen_buf, "%4d", msglen);
-	sprintf(vers_buf, "%4d", version);
-	sprintf(type_buf, "%4d", type);
-	sprintf(cmdid_buf, "%4d", cmd_id);
+	snprintf(msglen_buf, sizeof(msglen_buf), "%4d", msglen);
+	snprintf(vers_buf, sizeof(vers_buf), "%4d", version);
+	snprintf(type_buf, sizeof(type_buf), "%4d", type);
+	snprintf(cmdid_buf, sizeof(cmdid_buf), "%4d", cmd_id);
 	snprintf(client_buf, 17, "%16.16s", client_name);
 	if (rec) {
 		rec1 = csv_encode_record(csv, rec, 5, msglen_buf, vers_buf,
@@ -92,47 +75,47 @@ static int _ptm_lib_decode_header(csv_t *csv, int *msglen, int *version,
 	rec = csv_record_iter(csv);
 	if (rec == NULL) {
 		DLOG("malformed CSV\n");
-		return (-1);
+		return -1;
 	}
 	hdr = csv_field_iter(rec, &fld);
 	if (hdr == NULL) {
 		DLOG("malformed CSV\n");
-		return (-1);
+		return -1;
 	}
 	*msglen = atoi(hdr);
 	hdr = csv_field_iter_next(&fld);
 	if (hdr == NULL) {
 		DLOG("malformed CSV\n");
-		return (-1);
+		return -1;
 	}
 	*version = atoi(hdr);
 	hdr = csv_field_iter_next(&fld);
 	if (hdr == NULL) {
 		DLOG("malformed CSV\n");
-		return (-1);
+		return -1;
 	}
 	*type = atoi(hdr);
 	hdr = csv_field_iter_next(&fld);
 	if (hdr == NULL) {
 		DLOG("malformed CSV\n");
-		return (-1);
+		return -1;
 	}
 	*cmd_id = atoi(hdr);
 	hdr = csv_field_iter_next(&fld);
 	if (hdr == NULL) {
 		DLOG("malformed CSV\n");
-		return (-1);
+		return -1;
 	}
 	/* remove leading spaces */
 	for (i = j = 0; i < csv_field_len(fld); i++) {
-		if (!isspace((int)hdr[i])) {
+		if (!isspace((unsigned char)hdr[i])) {
 			client_name[j] = hdr[i];
 			j++;
 		}
 	}
 	client_name[j] = '\0';
 
-	return (0);
+	return 0;
 }
 
 int ptm_lib_append_msg(ptm_lib_handle_t *hdl, void *ctxt, const char *key,
@@ -143,7 +126,7 @@ int ptm_lib_append_msg(ptm_lib_handle_t *hdl, void *ctxt, const char *key,
 	csv_record_t *mh_rec, *rec;
 
 	if (!p_ctxt) {
-		ERRLOG("%s: no context \n", __FUNCTION__);
+		ERRLOG("%s: no context \n", __func__);
 		return -1;
 	}
 
@@ -154,7 +137,7 @@ int ptm_lib_append_msg(ptm_lib_handle_t *hdl, void *ctxt, const char *key,
 	/* append to the hdr record */
 	rec = csv_append_record(csv, rec, 1, key);
 	if (!rec) {
-		ERRLOG("%s: Could not append key \n", __FUNCTION__);
+		ERRLOG("%s: Could not append key \n", __func__);
 		return -1;
 	}
 
@@ -162,7 +145,7 @@ int ptm_lib_append_msg(ptm_lib_handle_t *hdl, void *ctxt, const char *key,
 	/* append to the data record */
 	rec = csv_append_record(csv, rec, 1, val);
 	if (!rec) {
-		ERRLOG("%s: Could not append val \n", __FUNCTION__);
+		ERRLOG("%s: Could not append val \n", __func__);
 		return -1;
 	}
 
@@ -186,7 +169,7 @@ int ptm_lib_init_msg(ptm_lib_handle_t *hdl, int cmd_id, int type, void *in_ctxt,
 	csv = csv_init(NULL, NULL, PTMLIB_MSG_SZ);
 
 	if (!csv) {
-		ERRLOG("%s: Could not allocate csv \n", __FUNCTION__);
+		ERRLOG("%s: Could not allocate csv \n", __func__);
 		return -1;
 	}
 
@@ -194,7 +177,7 @@ int ptm_lib_init_msg(ptm_lib_handle_t *hdl, int cmd_id, int type, void *in_ctxt,
 				     cmd_id, hdl->client_name);
 
 	if (!rec) {
-		ERRLOG("%s: Could not allocate record \n", __FUNCTION__);
+		ERRLOG("%s: Could not allocate record \n", __func__);
 		csv_clean(csv);
 		csv_free(csv);
 		return -1;
@@ -202,7 +185,7 @@ int ptm_lib_init_msg(ptm_lib_handle_t *hdl, int cmd_id, int type, void *in_ctxt,
 
 	p_ctxt = calloc(1, sizeof(*p_ctxt));
 	if (!p_ctxt) {
-		ERRLOG("%s: Could not allocate context \n", __FUNCTION__);
+		ERRLOG("%s: Could not allocate context \n", __func__);
 		csv_clean(csv);
 		csv_free(csv);
 		return -1;
@@ -234,7 +217,7 @@ int ptm_lib_cleanup_msg(ptm_lib_handle_t *hdl, void *ctxt)
 	csv_t *csv;
 
 	if (!p_ctxt) {
-		ERRLOG("%s: no context \n", __FUNCTION__);
+		ERRLOG("%s: no context \n", __func__);
 		return -1;
 	}
 
@@ -254,7 +237,7 @@ int ptm_lib_complete_msg(ptm_lib_handle_t *hdl, void *ctxt, char *buf, int *len)
 	csv_record_t *rec;
 
 	if (!p_ctxt) {
-		ERRLOG("%s: no context \n", __FUNCTION__);
+		ERRLOG("%s: no context \n", __func__);
 		return -1;
 	}
 
@@ -268,7 +251,7 @@ int ptm_lib_complete_msg(ptm_lib_handle_t *hdl, void *ctxt, char *buf, int *len)
 	/* parse csv contents into string */
 	if (buf && len) {
 		if (csv_serialize(csv, buf, *len)) {
-			ERRLOG("%s: cannot serialize\n", __FUNCTION__);
+			ERRLOG("%s: cannot serialize\n", __func__);
 			return -1;
 		}
 		*len = csvlen(csv);
@@ -323,22 +306,18 @@ static int _ptm_lib_read_ptm_socket(int fd, char *buf, int len)
 	while (bytes_read != len) {
 		rc = recv(fd, (void *)(buf + bytes_read), (len - bytes_read),
 			  MSG_DONTWAIT);
-		if (rc <= 0) {
-			if (errno && (errno != EAGAIN)
-			    && (errno != EWOULDBLOCK)) {
-				ERRLOG("fatal recv error(%s), closing connection, rc %d\n",
-				       strerror(errno), rc);
-				return (rc);
-			} else {
-				if (retries++ < 2) {
-					usleep(10000);
-					continue;
-				}
-				DLOG("max retries - recv error(%d - %s) bytes read %d (%d)\n",
-				     errno, strerror(errno), bytes_read, len);
-				return (bytes_read);
+		if (rc < 0 && (errno != EAGAIN) && (errno != EWOULDBLOCK)) {
+			ERRLOG("fatal recv error(%s), closing connection, rc %d\n", strerror(errno),
+			       rc);
+			return (rc);
+		} else if (rc <= 0) {
+			if (retries++ < 2) {
+				usleep(10000);
+				continue;
 			}
-			break;
+			DLOG("max retries - recv error(%d - %s) bytes read %d (%d)\n", errno,
+			     strerror(errno), bytes_read, len);
+			return (bytes_read);
 		} else {
 			bytes_read += rc;
 		}
@@ -364,7 +343,7 @@ int ptm_lib_process_msg(ptm_lib_handle_t *hdl, int fd, char *inbuf, int inlen,
 
 	if (!csv) {
 		DLOG("Cannot allocate csv for hdr\n");
-		return (-1);
+		return -1;
 	}
 
 	rc = _ptm_lib_decode_header(csv, &msglen, &ver, &type, &cmd_id,
@@ -390,14 +369,14 @@ int ptm_lib_process_msg(ptm_lib_handle_t *hdl, int fd, char *inbuf, int inlen,
 		/* we only support the get-status cmd */
 		if (strcmp(inbuf, PTMLIB_CMD_GET_STATUS)) {
 			DLOG("unsupported legacy cmd %s\n", inbuf);
-			return (-1);
+			return -1;
 		}
 		/* internally create a csv-style cmd */
 		ptm_lib_init_msg(hdl, 0, PTMLIB_MSG_TYPE_CMD, NULL,
 				 (void *)&p_ctxt);
 		if (!p_ctxt) {
 			DLOG("couldnt allocate context\n");
-			return (-1);
+			return -1;
 		}
 		ptm_lib_append_msg(hdl, p_ctxt, "cmd", PTMLIB_CMD_GET_STATUS);
 
@@ -425,8 +404,7 @@ int ptm_lib_process_msg(ptm_lib_handle_t *hdl, int fd, char *inbuf, int inlen,
 		csv_decode(csv, inbuf);
 		p_ctxt = calloc(1, sizeof(*p_ctxt));
 		if (!p_ctxt) {
-			ERRLOG("%s: Could not allocate context \n",
-			       __FUNCTION__);
+			ERRLOG("%s: Could not allocate context \n", __func__);
 			csv_clean(csv);
 			csv_free(csv);
 			return -1;
@@ -470,7 +448,7 @@ ptm_lib_handle_t *ptm_lib_register(char *client_name, ptm_cmd_cb cmd_cb,
 	hdl = calloc(1, sizeof(*hdl));
 
 	if (hdl) {
-		strncpy(hdl->client_name, client_name, PTMLIB_MAXNAMELEN - 1);
+		strlcpy(hdl->client_name, client_name, sizeof(hdl->client_name));
 		hdl->cmd_cb = cmd_cb;
 		hdl->notify_cb = notify_cb;
 		hdl->response_cb = response_cb;

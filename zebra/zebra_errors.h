@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Zebra-specific error messages.
  * Copyright (C) 2018  Cumulus Networks, Inc.
  *                     Quentin Young
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #ifndef __EC_ZEBRAORS_H__
@@ -72,6 +59,11 @@ enum zebra_log_refs {
 	EC_ZEBRA_VNI_DEL_FAILED,
 	EC_ZEBRA_VTEP_ADD_FAILED,
 	EC_ZEBRA_VNI_ADD_FAILED,
+	EC_ZEBRA_NHG_TABLE_INSERT_FAILED,
+	EC_ZEBRA_NHG_SYNC,
+	EC_ZEBRA_NHG_FIB_UPDATE,
+	EC_ZEBRA_NS_NO_DEFAULT,
+	EC_ZEBRA_PBR_RULE_UPDATE,
 	/* warnings */
 	EC_ZEBRA_NS_NOTIFY_READ,
 	EC_ZEBRAING_LM_PROTO_MISMATCH,
@@ -85,7 +77,6 @@ enum zebra_log_refs {
 	EC_ZEBRA_IRDP_BAD_CHECKSUM,
 	EC_ZEBRA_IRDP_BAD_TYPE_CODE,
 	EC_ZEBRA_IRDP_BAD_RX_FLAGS,
-	EC_ZEBRA_IRDP_BAD_TYPE,
 	EC_ZEBRA_RNH_NO_TABLE,
 	EC_ZEBRA_IFLIST_FAILED,
 	EC_ZEBRA_FPM_FORMAT_UNKNOWN,
@@ -126,6 +117,15 @@ enum zebra_log_refs {
 	EC_ZEBRA_DUP_MAC_DETECTED,
 	EC_ZEBRA_DUP_IP_INHERIT_DETECTED,
 	EC_ZEBRA_DUP_IP_DETECTED,
+	EC_ZEBRA_BAD_NHG_MESSAGE,
+	EC_ZEBRA_DUPLICATE_NHG_MESSAGE,
+	EC_ZEBRA_VRF_MISCONFIGURED,
+	EC_ZEBRA_ES_CREATE,
+	EC_ZEBRA_GRE_SET_UPDATE,
+	EC_ZEBRA_SRV6M_UNRELEASED_LOCATOR_CHUNK,
+	EC_ZEBRA_INTF_UPDATE_FAILURE,
+	EC_ZEBRA_SM_CANNOT_ASSIGN_SID,
+	EC_ZEBRA_SM_DAEMON_MISMATCH,
 };
 
 void zebra_error_init(void);

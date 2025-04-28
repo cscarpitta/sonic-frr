@@ -1,21 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Zebra MPLS VTY functions
  * Copyright (C) 2002 Kunihiro Ishiguro
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
@@ -37,6 +22,7 @@
 #include "zebra/zebra_rnh.h"
 #include "zebra/redistribute.h"
 #include "zebra/zebra_routemap.h"
+#include "zebra/label_manager.h"
 
 static int zebra_mpls_transit_lsp(struct vty *vty, int add_cmd,
 				  const char *inlabel_str, const char *gate_str,
@@ -56,11 +42,7 @@ static int zebra_mpls_transit_lsp(struct vty *vty, int add_cmd,
 		return CMD_WARNING_CONFIG_FAILED;
 	}
 
-	zvrf = vrf_info_lookup(VRF_DEFAULT);
-	if (!zvrf) {
-		vty_out(vty, "%% Default VRF does not exist\n");
-		return CMD_WARNING_CONFIG_FAILED;
-	}
+	zvrf = zebra_vrf_lookup_by_id(VRF_DEFAULT);
 
 	if (!inlabel_str) {
 		vty_out(vty, "%% No Label Information\n");
@@ -91,11 +73,11 @@ static int zebra_mpls_transit_lsp(struct vty *vty, int add_cmd,
 	if (gate_str) {
 		/* Gateway is a IPv4 or IPv6 nexthop. */
 		ret = inet_pton(AF_INET6, gate_str, &gate.ipv6);
-		if (ret)
+		if (ret == 1)
 			gtype = NEXTHOP_TYPE_IPV6;
 		else {
 			ret = inet_pton(AF_INET, gate_str, &gate.ipv4);
-			if (ret)
+			if (ret == 1)
 				gtype = NEXTHOP_TYPE_IPV4;
 			else {
 				vty_out(vty, "%% Invalid nexthop\n");
@@ -131,7 +113,7 @@ static int zebra_mpls_transit_lsp(struct vty *vty, int add_cmd,
 		ret = zebra_mpls_static_lsp_del(zvrf, in_label, gtype, &gate,
 						0);
 
-	if (ret) {
+	if (ret != 0) {
 		vty_out(vty, "%% LSP cannot be %s\n",
 			add_cmd ? "added" : "deleted");
 		return CMD_WARNING_CONFIG_FAILED;
@@ -200,13 +182,9 @@ static int zebra_mpls_bind(struct vty *vty, int add_cmd, const char *prefix,
 	uint32_t label;
 	int ret;
 
-	zvrf = vrf_info_lookup(VRF_DEFAULT);
-	if (!zvrf) {
-		vty_out(vty, "%% Default VRF does not exist\n");
-		return CMD_WARNING_CONFIG_FAILED;
-	}
+	zvrf = zebra_vrf_lookup_by_id(VRF_DEFAULT);
 
-	memset(&p, 0, sizeof(struct prefix));
+	memset(&p, 0, sizeof(p));
 	ret = str2prefix(prefix, &p);
 	if (ret <= 0) {
 		vty_out(vty, "%% Malformed address\n");
@@ -232,7 +210,7 @@ static int zebra_mpls_bind(struct vty *vty, int add_cmd, const char *prefix,
 				vty_out(vty, "%% Invalid label\n");
 				return CMD_WARNING_CONFIG_FAILED;
 			}
-			if (zebra_mpls_label_already_bound(zvrf, label)) {
+			if (zebra_mpls_label_already_bound(zvrf, &p, label)) {
 				vty_out(vty,
 					"%% Label already bound to a FEC\n");
 				return CMD_WARNING_CONFIG_FAILED;
@@ -269,7 +247,7 @@ DEFUN (mpls_label_bind,
 
 DEFUN (no_mpls_label_bind,
        no_mpls_label_bind_cmd,
-       "no mpls label bind <A.B.C.D/M|X:X::X:X/M> [<(16-1048575)|implicit-null>]",
+       "no mpls label bind <A.B.C.D/M|X:X::X:X/M> [<(16-1048575)|implicit-null|explicit-null>]",
        NO_STR
        MPLS_STR
        "Label configuration\n"
@@ -277,7 +255,8 @@ DEFUN (no_mpls_label_bind,
        "IPv4 prefix\n"
        "IPv6 prefix\n"
        "MPLS Label to bind\n"
-       "Use Implicit-Null Label\n")
+       "Use Implicit-Null Label\n"
+       "Use Explicit-Null Label\n")
 {
 	return zebra_mpls_bind(vty, 0, argv[4]->arg, NULL);
 }
@@ -288,13 +267,13 @@ static int zebra_mpls_config(struct vty *vty)
 	int write = 0;
 	struct zebra_vrf *zvrf;
 
-	zvrf = vrf_info_lookup(VRF_DEFAULT);
-	if (!zvrf)
-		return 0;
+	zvrf = zebra_vrf_lookup_by_id(VRF_DEFAULT);
 
 	write += zebra_mpls_write_lsp_config(vty, zvrf);
 	write += zebra_mpls_write_fec_config(vty, zvrf);
 	write += zebra_mpls_write_label_block_config(vty, zvrf);
+	write += lm_write_label_block_config_call(vty, zvrf);
+
 	return write;
 }
 
@@ -311,9 +290,7 @@ DEFUN (show_mpls_fec,
 	struct prefix p;
 	int ret;
 
-	zvrf = vrf_info_lookup(VRF_DEFAULT);
-	if (!zvrf)
-		return 0;
+	zvrf = zebra_vrf_lookup_by_id(VRF_DEFAULT);
 
 	if (argc == 3)
 		zebra_mpls_print_fec_table(vty, zvrf);
@@ -341,7 +318,7 @@ DEFUN (show_mpls_table,
 	struct zebra_vrf *zvrf;
 	bool uj = use_json(argc, argv);
 
-	zvrf = vrf_info_lookup(VRF_DEFAULT);
+	zvrf = zebra_vrf_lookup_by_id(VRF_DEFAULT);
 	zebra_mpls_print_lsp_table(vty, zvrf, uj);
 	return CMD_SUCCESS;
 }
@@ -359,7 +336,7 @@ DEFUN (show_mpls_table_lsp,
 	struct zebra_vrf *zvrf;
 	bool uj = use_json(argc, argv);
 
-	zvrf = vrf_info_lookup(VRF_DEFAULT);
+	zvrf = zebra_vrf_lookup_by_id(VRF_DEFAULT);
 	label = atoi(argv[3]->arg);
 	zebra_mpls_print_lsp(vty, zvrf, label, uj);
 	return CMD_SUCCESS;
@@ -388,10 +365,6 @@ static int zebra_mpls_global_block(struct vty *vty, int add_cmd,
 	struct zebra_vrf *zvrf;
 
 	zvrf = zebra_vrf_lookup_by_id(VRF_DEFAULT);
-	if (!zvrf) {
-		vty_out(vty, "%% Default VRF does not exist\n");
-		return CMD_WARNING_CONFIG_FAILED;
-	}
 
 	if (add_cmd) {
 		if (!start_label_str || !end_label_str) {
@@ -449,15 +422,21 @@ DEFUN (no_mpls_label_global_block,
 	return zebra_mpls_global_block(vty, 0, NULL, NULL);
 }
 
+static int zebra_mpls_config(struct vty *vty);
 /* MPLS node for MPLS LSP. */
-static struct cmd_node mpls_node = {MPLS_NODE, "", 1};
+static struct cmd_node mpls_node = {
+	.name = "mpls",
+	.node = MPLS_NODE,
+	.prompt = "",
+	.config_write = zebra_mpls_config,
+};
 
 /* MPLS VTY.  */
 void zebra_mpls_vty_init(void)
 {
 	install_element(VIEW_NODE, &show_mpls_status_cmd);
 
-	install_node(&mpls_node, zebra_mpls_config);
+	install_node(&mpls_node);
 
 	install_element(CONFIG_NODE, &mpls_transit_lsp_cmd);
 	install_element(CONFIG_NODE, &no_mpls_transit_lsp_cmd);

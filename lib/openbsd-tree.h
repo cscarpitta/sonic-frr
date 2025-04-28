@@ -1,27 +1,7 @@
+// SPDX-License-Identifier: ISC AND BSD-2-Clause
 /*	$OpenBSD: tree.h,v 1.14 2015/05/25 03:07:49 deraadt Exp $	*/
 /*
  * Copyright 2002 Niels Provos <provos@citi.umich.edu>
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
 #ifndef _SYS_TREE_H_
@@ -30,6 +10,21 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+/*
+ * NOTICE:
+ *
+ * If you are reading this file in an effort to add a new tree structure
+ * this is the wrong place to be using it.  Please see the typesafe
+ * data structures, or ask one of the other developers.
+ *
+ * If you are reading this file as a way to update an existing usage
+ * of this data structure, please consider just converting the data
+ * structure to one of the typesafe data structures instead.  However,
+ * among converting datastrucutres, the the BSD ones are the lowest
+ * priority / should be converted last. They are already typesafe and
+ * use inline linking nodes, so the only gain is consistency. Please
+ * convert uses of linklist.h and hash.h first.
+ */
 
 /*
  * This file defines data structures for different types of trees:
@@ -318,18 +313,6 @@ extern "C" {
 
 /*
  * Copyright (c) 2016 David Gwynne <dlg@openbsd.org>
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #define RB_BLACK	0
@@ -364,18 +347,18 @@ static inline void _rb_init(struct rbt_tree *rbt)
 	rbt->rbt_root = NULL;
 }
 
-static inline int _rb_empty(struct rbt_tree *rbt)
+static inline int _rb_empty(const struct rbt_tree *rbt)
 {
 	return (rbt->rbt_root == NULL);
 }
 
 void *_rb_insert(const struct rb_type *, struct rbt_tree *, void *);
 void *_rb_remove(const struct rb_type *, struct rbt_tree *, void *);
-void *_rb_find(const struct rb_type *, struct rbt_tree *, const void *);
-void *_rb_nfind(const struct rb_type *, struct rbt_tree *, const void *);
-void *_rb_root(const struct rb_type *, struct rbt_tree *);
-void *_rb_min(const struct rb_type *, struct rbt_tree *);
-void *_rb_max(const struct rb_type *, struct rbt_tree *);
+void *_rb_find(const struct rb_type *, const struct rbt_tree *, const void *);
+void *_rb_nfind(const struct rb_type *, const struct rbt_tree *, const void *);
+void *_rb_root(const struct rb_type *, const struct rbt_tree *);
+void *_rb_min(const struct rb_type *, const struct rbt_tree *);
+void *_rb_max(const struct rb_type *, const struct rbt_tree *);
 void *_rb_next(const struct rb_type *, void *);
 void *_rb_prev(const struct rb_type *, void *);
 void *_rb_left(const struct rb_type *, void *);
@@ -401,56 +384,58 @@ int _rb_check(const struct rb_type *, void *, unsigned long);
 	__attribute__((__unused__)) static inline struct _type                 \
 		*_name##_RB_INSERT(struct _name *head, struct _type *elm)      \
 	{                                                                      \
-		return (struct _type *)_rb_insert(                             \
-			_name##_RB_TYPE, &head->rbh_root, elm);                \
+		return (struct _type *)_rb_insert(_name##_RB_TYPE,             \
+						  &head->rbh_root, elm);       \
 	}                                                                      \
                                                                                \
 	__attribute__((__unused__)) static inline struct _type                 \
 		*_name##_RB_REMOVE(struct _name *head, struct _type *elm)      \
 	{                                                                      \
-		return (struct _type *)_rb_remove(                             \
-			_name##_RB_TYPE, &head->rbh_root, elm);                \
+		return (struct _type *)_rb_remove(_name##_RB_TYPE,             \
+						  &head->rbh_root, elm);       \
 	}                                                                      \
                                                                                \
 	__attribute__((__unused__)) static inline struct _type                 \
-		*_name##_RB_FIND(struct _name *head, const struct _type *key)  \
+		*_name##_RB_FIND(const struct _name *head,                     \
+				 const struct _type *key)                      \
 	{                                                                      \
-		return (struct _type *)_rb_find(                               \
-			_name##_RB_TYPE, &head->rbh_root, key);                \
+		return (struct _type *)_rb_find(_name##_RB_TYPE,               \
+						&head->rbh_root, key);         \
 	}                                                                      \
                                                                                \
 	__attribute__((__unused__)) static inline struct _type                 \
-		*_name##_RB_NFIND(struct _name *head, const struct _type *key) \
+		*_name##_RB_NFIND(const struct _name *head,                    \
+				  const struct _type *key)                     \
 	{                                                                      \
-		return (struct _type *)_rb_nfind(                              \
-			_name##_RB_TYPE, &head->rbh_root, key);                \
+		return (struct _type *)_rb_nfind(_name##_RB_TYPE,              \
+						 &head->rbh_root, key);        \
 	}                                                                      \
                                                                                \
 	__attribute__((__unused__)) static inline struct _type                 \
-		*_name##_RB_ROOT(struct _name *head)                           \
+		*_name##_RB_ROOT(const struct _name *head)                     \
 	{                                                                      \
-		return (struct _type *)_rb_root(                               \
-			_name##_RB_TYPE, &head->rbh_root);                     \
+		return (struct _type *)_rb_root(_name##_RB_TYPE,               \
+						&head->rbh_root);              \
 	}                                                                      \
                                                                                \
 	__attribute__((__unused__)) static inline int _name##_RB_EMPTY(        \
-		struct _name *head)                                            \
+		const struct _name *head)                                      \
 	{                                                                      \
 		return _rb_empty(&head->rbh_root);                             \
 	}                                                                      \
                                                                                \
 	__attribute__((__unused__)) static inline struct _type                 \
-		*_name##_RB_MIN(struct _name *head)                            \
+		*_name##_RB_MIN(const struct _name *head)                      \
 	{                                                                      \
-		return (struct _type *)_rb_min(                                \
-			_name##_RB_TYPE, &head->rbh_root);                     \
+		return (struct _type *)_rb_min(_name##_RB_TYPE,                \
+					       &head->rbh_root);               \
 	}                                                                      \
                                                                                \
 	__attribute__((__unused__)) static inline struct _type                 \
-		*_name##_RB_MAX(struct _name *head)                            \
+		*_name##_RB_MAX(const struct _name *head)                      \
 	{                                                                      \
-		return (struct _type *)_rb_max(                                \
-			_name##_RB_TYPE, &head->rbh_root);                     \
+		return (struct _type *)_rb_max(_name##_RB_TYPE,                \
+					       &head->rbh_root);               \
 	}                                                                      \
                                                                                \
 	__attribute__((__unused__)) static inline struct _type                 \

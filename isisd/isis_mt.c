@@ -1,27 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * IS-IS Rout(e)ing protocol - Multi Topology Support
  *
  * Copyright (C) 2017 Christian Franke
  *
- * This file is part of FreeRangeRouting (FRR)
- *
- * FRR is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * FRR is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
+ * This file is part of FRRouting (FRR)
  */
 #include <zebra.h>
 #include "isisd/isisd.h"
-#include "isisd/isis_memory.h"
 #include "isisd/isis_circuit.h"
 #include "isisd/isis_adjacency.h"
 #include "isisd/isis_misc.h"
@@ -29,9 +15,9 @@
 #include "isisd/isis_mt.h"
 #include "isisd/isis_tlvs.h"
 
-DEFINE_MTYPE_STATIC(ISISD, MT_AREA_SETTING, "ISIS MT Area Setting")
-DEFINE_MTYPE_STATIC(ISISD, MT_CIRCUIT_SETTING, "ISIS MT Circuit Setting")
-DEFINE_MTYPE_STATIC(ISISD, MT_ADJ_INFO, "ISIS MT Adjacency Info")
+DEFINE_MTYPE_STATIC(ISISD, MT_AREA_SETTING, "ISIS MT Area Setting");
+DEFINE_MTYPE_STATIC(ISISD, MT_CIRCUIT_SETTING, "ISIS MT Circuit Setting");
+DEFINE_MTYPE_STATIC(ISISD, MT_ADJ_INFO, "ISIS MT Adjacency Info");
 
 bool isis_area_ipv6_dstsrc_enabled(struct isis_area *area)
 {
@@ -57,8 +43,8 @@ const char *isis_mtid2str(uint16_t mtid)
 	static char buf[sizeof("65535")];
 
 	switch (mtid) {
-	case ISIS_MT_IPV4_UNICAST:
-		return "ipv4-unicast";
+	case ISIS_MT_STANDARD:
+		return "standard";
 	case ISIS_MT_IPV4_MGMT:
 		return "ipv4-mgmt";
 	case ISIS_MT_IPV6_UNICAST:
@@ -72,7 +58,7 @@ const char *isis_mtid2str(uint16_t mtid)
 	case ISIS_MT_IPV6_DSTSRC:
 		return "ipv6-dstsrc";
 	default:
-		snprintf(buf, sizeof(buf), "%" PRIu16, mtid);
+		snprintf(buf, sizeof(buf), "%hu", mtid);
 		return buf;
 	}
 }
@@ -81,6 +67,8 @@ uint16_t isis_str2mtid(const char *name)
 {
 	if (!strcmp(name, "ipv4-unicast"))
 		return ISIS_MT_IPV4_UNICAST;
+	if (!strcmp(name, "standard"))
+		return ISIS_MT_STANDARD;
 	if (!strcmp(name, "ipv4-mgmt"))
 		return ISIS_MT_IPV4_MGMT;
 	if (!strcmp(name, "ipv6-unicast"))
@@ -238,7 +226,8 @@ struct isis_area_mt_setting **area_mt_settings(struct isis_area *area,
 
 		count++;
 		if (count > size) {
-			rv = XREALLOC(MTYPE_TMP, rv, count * sizeof(*rv));
+			rv = XREALLOC(MTYPE_MT_AREA_SETTING, rv,
+				      count * sizeof(*rv));
 			size = count;
 		}
 		rv[count - 1] = setting;
@@ -302,6 +291,7 @@ circuit_get_mt_setting(struct isis_circuit *circuit, uint16_t mtid)
 	return setting;
 }
 
+#ifdef FABRICD
 static int circuit_write_mt_settings(struct isis_circuit *circuit,
 				     struct vty *vty)
 {
@@ -318,6 +308,7 @@ static int circuit_write_mt_settings(struct isis_circuit *circuit,
 	}
 	return written;
 }
+#endif
 
 struct isis_circuit_mt_setting **
 circuit_mt_settings(struct isis_circuit *circuit, unsigned int *mt_count)
@@ -351,7 +342,8 @@ circuit_mt_settings(struct isis_circuit *circuit, unsigned int *mt_count)
 
 		count++;
 		if (count > size) {
-			rv = XREALLOC(MTYPE_TMP, rv, count * sizeof(*rv));
+			rv = XREALLOC(MTYPE_MT_AREA_SETTING, rv,
+				      count * sizeof(*rv));
 			size = count;
 		}
 		rv[count - 1] = setting;
@@ -386,8 +378,8 @@ bool tlvs_to_adj_mt_set(struct isis_tlvs *tlvs, bool v4_usable, bool v6_usable,
 
 	old_mt_count = adj->mt_count;
 	if (old_mt_count) {
-		old_mt_set =
-			XCALLOC(MTYPE_TMP, old_mt_count * sizeof(*old_mt_set));
+		old_mt_set = XCALLOC(MTYPE_MT_AREA_SETTING,
+				     old_mt_count * sizeof(*old_mt_set));
 		memcpy(old_mt_set, adj->mt_set,
 		       old_mt_count * sizeof(*old_mt_set));
 	}
@@ -446,7 +438,7 @@ bool tlvs_to_adj_mt_set(struct isis_tlvs *tlvs, bool v4_usable, bool v6_usable,
 		changed = true;
 
 	if (old_mt_count)
-		XFREE(MTYPE_TMP, old_mt_set);
+		XFREE(MTYPE_MT_AREA_SETTING, old_mt_set);
 
 	return changed;
 }
@@ -474,7 +466,7 @@ static void mt_set_add(uint16_t **mt_set, unsigned int *size,
 	}
 
 	if (*index >= *size) {
-		*mt_set = XREALLOC(MTYPE_TMP, *mt_set,
+		*mt_set = XREALLOC(MTYPE_MT_AREA_SETTING, *mt_set,
 				   sizeof(**mt_set) * ((*index) + 1));
 		*size = (*index) + 1;
 	}
@@ -511,50 +503,57 @@ static uint16_t *circuit_bcast_mt_set(struct isis_circuit *circuit, int level,
 
 static void tlvs_add_mt_set(struct isis_area *area, struct isis_tlvs *tlvs,
 			    unsigned int mt_count, uint16_t *mt_set,
-			    uint8_t *id, uint32_t metric, uint8_t *subtlvs,
-			    uint8_t subtlv_len)
+			    uint8_t *id, uint32_t metric,
+			    struct isis_ext_subtlvs *ext)
 {
+	/* Check if MT is enable for this area */
+	if (!area_is_mt(area)) {
+		lsp_debug(
+			"ISIS (%s): Adding %pPN as te-style neighbor (MT disable)",
+			area->area_tag, id);
+		isis_tlvs_add_extended_reach(tlvs, ISIS_MT_DISABLE, id, metric,
+					     ext);
+		return;
+	}
+
+	/* Process Multi-Topology */
 	for (unsigned int i = 0; i < mt_count; i++) {
 		uint16_t mtid = mt_set[i];
 		if (mt_set[i] == ISIS_MT_IPV4_UNICAST) {
-			lsp_debug(
-				"ISIS (%s): Adding %s.%02x as te-style neighbor",
-				area->area_tag, sysid_print(id),
-				LSP_PSEUDO_ID(id));
+			lsp_debug("ISIS (%s): Adding %pPN as te-style neighbor",
+				  area->area_tag, id);
 		} else {
 			lsp_debug(
-				"ISIS (%s): Adding %s.%02x as mt-style neighbor for %s",
-				area->area_tag, sysid_print(id),
-				LSP_PSEUDO_ID(id), isis_mtid2str(mtid));
+				"ISIS (%s): Adding %pPN as mt-style neighbor for %s",
+				area->area_tag, id, isis_mtid2str(mtid));
 		}
-		isis_tlvs_add_extended_reach(tlvs, mtid, id, metric, subtlvs,
-					     subtlv_len);
+		isis_tlvs_add_extended_reach(tlvs, mtid, id, metric, ext);
 	}
 }
 
 void tlvs_add_mt_bcast(struct isis_tlvs *tlvs, struct isis_circuit *circuit,
-		       int level, uint8_t *id, uint32_t metric,
-		       uint8_t *subtlvs, uint8_t subtlv_len)
+		       int level, uint8_t *id, uint32_t metric)
 {
 	unsigned int mt_count;
 	uint16_t *mt_set = circuit_bcast_mt_set(circuit, level, &mt_count);
 
 	tlvs_add_mt_set(circuit->area, tlvs, mt_count, mt_set, id, metric,
-			subtlvs, subtlv_len);
+			circuit->ext);
 }
 
 void tlvs_add_mt_p2p(struct isis_tlvs *tlvs, struct isis_circuit *circuit,
-		     uint8_t *id, uint32_t metric, uint8_t *subtlvs,
-		     uint8_t subtlv_len)
+		     uint8_t *id, uint32_t metric)
 {
 	struct isis_adjacency *adj = circuit->u.p2p.neighbor;
 
 	tlvs_add_mt_set(circuit->area, tlvs, adj->mt_count, adj->mt_set, id,
-			metric, subtlvs, subtlv_len);
+			metric, circuit->ext);
 }
 
 void mt_init(void)
 {
+#ifdef FABRICD
 	hook_register(isis_circuit_config_write,
 		      circuit_write_mt_settings);
+#endif
 }

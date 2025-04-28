@@ -1,34 +1,25 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Virtual terminal interface shell.
  * Copyright (C) 2000 Kunihiro Ishiguro
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
 
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <setjmp.h>
-#include <sys/wait.h>
 #include <pwd.h>
 #include <sys/file.h>
 #include <unistd.h>
 
+/* readline carries some ancient definitions around */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstrict-prototypes"
 #include <readline/readline.h>
 #include <readline/history.h>
+#pragma GCC diagnostic pop
 
 /*
  * The append_history function only appears in newer versions
@@ -45,8 +36,9 @@
 #include "command.h"
 #include "memory.h"
 #include "linklist.h"
-#include "memory_vty.h"
 #include "libfrr.h"
+#include "ferr.h"
+#include "lib_errors.h"
 
 #include "vtysh/vtysh.h"
 #include "vtysh/vtysh_user.h"
@@ -73,39 +65,58 @@ int execute_flag = 0;
 /* Flag to indicate if in user/unprivileged mode. */
 int user_mode;
 
-/* For sigsetjmp() & siglongjmp(). */
-static sigjmp_buf jmpbuf;
-
-/* Flag for avoid recursive siglongjmp() call. */
-static int jmpflag = 0;
-
-/* A static variable for holding the line. */
-static char *line_read;
-
 /* Master of threads. */
-struct thread_master *master;
+struct event_loop *master;
 
 /* Command logging */
 FILE *logfile;
 
+static void vtysh_rl_callback(char *line_read)
+{
+	HIST_ENTRY *last;
+
+	rl_callback_handler_remove();
+
+	if (!line_read) {
+		vtysh_loop_exited = true;
+		return;
+	}
+
+	/* If the line has any text in it, save it on the history. But only if
+	 * last command in history isn't the same one.
+	 */
+	if (*line_read) {
+		using_history();
+		last = previous_history();
+		if (!last || strcmp(last->line, line_read) != 0) {
+			add_history(line_read);
+			append_history(1, history_file);
+		}
+	}
+
+	vtysh_execute(line_read);
+
+	if (!vtysh_loop_exited)
+		rl_callback_handler_install(vtysh_prompt(), vtysh_rl_callback);
+
+	free(line_read);
+}
+
 /* SIGTSTP handler.  This function care user's ^Z input. */
 static void sigtstp(int sig)
 {
+	rl_callback_handler_remove();
+
 	/* Execute "end" command. */
 	vtysh_execute("end");
+
+	if (!vtysh_loop_exited)
+		rl_callback_handler_install(vtysh_prompt(), vtysh_rl_callback);
 
 	/* Initialize readline. */
 	rl_initialize();
 	printf("\n");
-
-	/* Check jmpflag for duplicate siglongjmp(). */
-	if (!jmpflag)
-		return;
-
-	jmpflag = 0;
-
-	/* Back to main command loop. */
-	siglongjmp(jmpbuf, 1);
+	rl_forced_update_display();
 }
 
 /* SIGINT handler.  This function care user's ^Z input.  */
@@ -152,7 +163,10 @@ static void usage(int status)
 			progname);
 	else
 		printf("Usage : %s [OPTION...]\n\n"
-		       "Integrated shell for FRR. \n\n"
+		       "Integrated shell for FRR (version " FRR_VERSION
+		       "). \n"
+		       "Configured with:\n    " FRR_CONFIG_ARGS
+		       "\n\n"
 		       "-b, --boot               Execute boot startup configuration\n"
 		       "-c, --command            Execute argument as command\n"
 		       "-d, --daemon             Connect only to the specified daemon\n"
@@ -165,6 +179,9 @@ static void usage(int status)
 		       "-N  --pathspace          Insert prefix into config & socket paths\n"
 		       "-u  --user               Run as an unprivileged user\n"
 		       "-w, --writeconfig        Write integrated config (frr.conf) and exit\n"
+		       "-H, --histfile           Override history file\n"
+		       "-t, --timestamp          Print a timestamp before going to shell or reading the configuration\n"
+		       "    --no-fork            Don't fork clients to handle daemons (slower for large configs)\n"
 		       "-h, --help               Display this help and exit\n\n"
 		       "Note that multiple commands may be executed from the command\n"
 		       "line by passing multiple -c args, or by embedding linefeed\n"
@@ -178,6 +195,7 @@ static void usage(int status)
 /* VTY shell options, we use GNU getopt library. */
 #define OPTION_VTYSOCK 1000
 #define OPTION_CONFDIR 1001
+#define OPTION_NOFORK 1002
 struct option longopts[] = {
 	{"boot", no_argument, NULL, 'b'},
 	/* For compatibility with older zebra/quagga versions */
@@ -187,6 +205,7 @@ struct option longopts[] = {
 	{"vty_socket", required_argument, NULL, OPTION_VTYSOCK},
 	{"config_dir", required_argument, NULL, OPTION_CONFDIR},
 	{"inputfile", required_argument, NULL, 'f'},
+	{"histfile", required_argument, NULL, 'H'},
 	{"echo", no_argument, NULL, 'E'},
 	{"dryrun", no_argument, NULL, 'C'},
 	{"help", no_argument, NULL, 'h'},
@@ -195,47 +214,56 @@ struct option longopts[] = {
 	{"writeconfig", no_argument, NULL, 'w'},
 	{"pathspace", required_argument, NULL, 'N'},
 	{"user", no_argument, NULL, 'u'},
+	{"timestamp", no_argument, NULL, 't'},
+	{"no-fork", no_argument, NULL, OPTION_NOFORK},
 	{0}};
 
-/* Read a string, and return a pointer to it.  Returns NULL on EOF. */
-static char *vtysh_rl_gets(void)
+bool vtysh_loop_exited;
+
+static struct event *vtysh_rl_read_thread;
+
+static void vtysh_rl_read(struct event *thread)
 {
-	HIST_ENTRY *last;
-	/* If the buffer has already been allocated, return the memory
-	 * to the free pool. */
-	if (line_read) {
-		free(line_read);
-		line_read = NULL;
-	}
+	bool *suppress_warnings = EVENT_ARG(thread);
 
-	/* Get a line from the user.  Change prompt according to node.  XXX. */
-	line_read = readline(vtysh_prompt());
+	event_add_read(master, vtysh_rl_read, suppress_warnings, STDIN_FILENO,
+		       &vtysh_rl_read_thread);
+	rl_callback_read_char();
+}
 
-	/* If the line has any text in it, save it on the history. But only if
-	 * last command in history isn't the same one. */
-	if (line_read && *line_read) {
-		using_history();
-		last = previous_history();
-		if (!last || strcmp(last->line, line_read) != 0) {
-			add_history(line_read);
-			append_history(1, history_file);
-		}
-	}
+/* Read a string, and return a pointer to it.  Returns NULL on EOF. */
+static void vtysh_rl_run(void)
+{
+	struct event thread;
+	bool suppress_warnings = true;
 
-	return (line_read);
+	master = event_master_create(NULL);
+
+	rl_callback_handler_install(vtysh_prompt(), vtysh_rl_callback);
+	event_add_read(master, vtysh_rl_read, &suppress_warnings, STDIN_FILENO,
+		       &vtysh_rl_read_thread);
+
+	while (!vtysh_loop_exited && event_fetch(master, &thread))
+		event_call(&thread);
+
+	if (!vtysh_loop_exited)
+		rl_callback_handler_remove();
+
+	event_master_free(master);
 }
 
 static void log_it(const char *line)
 {
 	time_t t = time(NULL);
-	struct tm *tmp = localtime(&t);
+	struct tm tmp;
 	const char *user = getenv("USER");
 	char tod[64];
 
+	localtime_r(&t, &tmp);
 	if (!user)
 		user = "boot";
 
-	strftime(tod, sizeof tod, "%Y%m%d-%H:%M.%S", tmp);
+	strftime(tod, sizeof(tod), "%Y%m%d-%H:%M.%S", &tmp);
 
 	fprintf(logfile, "%s:%s %s\n", tod, user, line);
 }
@@ -301,6 +329,8 @@ int main(int argc, char **argv, char **env)
 	int opt;
 	int dryrun = 0;
 	int boot_flag = 0;
+	bool ts_flag = false;
+	bool no_fork = false;
 	const char *daemon_name = NULL;
 	const char *inputfile = NULL;
 	struct cmd_rec {
@@ -318,6 +348,9 @@ int main(int argc, char **argv, char **env)
 	char sysconfdir[MAXPATHLEN];
 	const char *pathspace_arg = NULL;
 	char pathspace[MAXPATHLEN] = "";
+	const char *histfile = NULL;
+	const char *histfile_env = getenv("VTYSH_HISTFILE");
+	const char *logpath = getenv("VTYSH_LOG");
 
 	/* SUID: drop down to calling user & go back up when needed */
 	elevuid = geteuid();
@@ -332,12 +365,13 @@ int main(int argc, char **argv, char **env)
 	progname = ((p = strrchr(argv[0], '/')) ? ++p : argv[0]);
 
 	strlcpy(sysconfdir, frr_sysconfdir, sizeof(sysconfdir));
-	strlcpy(vtydir, frr_vtydir, sizeof(vtydir));
+
+	strlcpy(vtydir, frr_runstatedir, sizeof(vtydir));
 
 	/* Option handling. */
 	while (1) {
-		opt = getopt_long(argc, argv, "be:c:d:nf:mEhCwN:u",
-				  longopts, 0);
+		opt = getopt_long(argc, argv, "be:c:d:nf:H:mEhCwN:ut", longopts,
+				  0);
 
 		if (opt == EOF)
 			break;
@@ -367,6 +401,9 @@ int main(int argc, char **argv, char **env)
 		case OPTION_CONFDIR:
 			ditch_suid = 1; /* option disables SUID */
 			snprintf(sysconfdir, sizeof(sysconfdir), "%s/", optarg);
+			break;
+		case OPTION_NOFORK:
+			no_fork = true;
 			break;
 		case 'N':
 			if (strchr(optarg, '/') || strchr(optarg, '.')) {
@@ -398,17 +435,27 @@ int main(int argc, char **argv, char **env)
 		case 'u':
 			user_mode = 1;
 			break;
+		case 't':
+			ts_flag = true;
+			break;
 		case 'w':
 			writeconfig = 1;
 			break;
 		case 'h':
 			usage(0);
 			break;
+		case 'H':
+			histfile = optarg;
+			break;
 		default:
 			usage(1);
 			break;
 		}
 	}
+
+	/* No need for forks if we're talking to 1 daemon */
+	if (daemon_name)
+		no_fork = true;
 
 	if (ditch_suid) {
 		elevuid = realuid;
@@ -417,14 +464,12 @@ int main(int argc, char **argv, char **env)
 
 	if (markfile + writeconfig + dryrun + boot_flag > 1) {
 		fprintf(stderr,
-			"Invalid combination of arguments.  Please specify at "
-			"most one of:\n\t-b, -C, -m, -w\n");
+			"Invalid combination of arguments.  Please specify at most one of:\n\t-b, -C, -m, -w\n");
 		return 1;
 	}
 	if (inputfile && (writeconfig || boot_flag)) {
 		fprintf(stderr,
-			"WARNING: Combinining the -f option with -b or -w is "
-			"NOT SUPPORTED since its\nresults are inconsistent!\n");
+			"WARNING: Combining the -f option with -b or -w is NOT SUPPORTED since its\nresults are inconsistent!\n");
 	}
 
 	snprintf(vtysh_config, sizeof(vtysh_config), "%s%s%s", sysconfdir,
@@ -438,7 +483,6 @@ int main(int argc, char **argv, char **env)
 	}
 
 	/* Initialize user input buffer. */
-	line_read = NULL;
 	setlinebuf(stdout);
 
 	/* Signal and others. */
@@ -446,7 +490,6 @@ int main(int argc, char **argv, char **env)
 
 	/* Make vty structure and register commands. */
 	vtysh_init_vty();
-	vtysh_init_cmd();
 	vtysh_user_init();
 	vtysh_config_init();
 
@@ -456,15 +499,18 @@ int main(int argc, char **argv, char **env)
 		/* Read vtysh configuration file before connecting to daemons.
 		 * (file may not be readable to calling user in SUID mode) */
 		suid_on();
-		vtysh_read_config(vtysh_config);
+		vtysh_apply_config(vtysh_config, dryrun, false);
 		suid_off();
 	}
+	/* Error code library system */
+	log_ref_init();
+	lib_error_init();
 
 	if (markfile) {
 		if (!inputfile) {
 			fprintf(stderr,
 				"-f option MUST be specified with -m option\n");
-			return (1);
+			return 1;
 		}
 		return (vtysh_mark_file(inputfile));
 	}
@@ -472,9 +518,9 @@ int main(int argc, char **argv, char **env)
 	/* Start execution only if not in dry-run mode */
 	if (dryrun && !cmd) {
 		if (inputfile) {
-			ret = vtysh_read_config(inputfile);
+			ret = vtysh_apply_config(inputfile, dryrun, false);
 		} else {
-			ret = vtysh_read_config(frr_config);
+			ret = vtysh_apply_config(frr_config, dryrun, false);
 		}
 
 		exit(ret);
@@ -528,6 +574,9 @@ int main(int argc, char **argv, char **env)
 	/* Do not connect until we have passed authentication. */
 	if (vtysh_connect_all(daemon_name) <= 0) {
 		fprintf(stderr, "Exiting: failed to connect to any daemons.\n");
+		if (geteuid() != 0)
+			fprintf(stderr,
+				"Hint: if this seems wrong, try running me as a privileged user!\n");
 		if (no_error)
 			exit(0);
 		else
@@ -550,22 +599,39 @@ int main(int argc, char **argv, char **env)
 		return vtysh_write_config_integrated();
 	}
 
-	if (inputfile) {
+	if (boot_flag)
+		inputfile = frr_config;
+
+	if (inputfile || boot_flag) {
 		vtysh_flock_config(inputfile);
-		ret = vtysh_read_config(inputfile);
+		ret = vtysh_apply_config(inputfile, dryrun, !no_fork);
 		vtysh_unflock_config();
+
+		if (no_error)
+			ret = 0;
+
 		exit(ret);
 	}
 
 	/*
 	 * Setup history file for use by both -c and regular input
 	 * If we can't find the home directory, then don't store
-	 * the history information
+	 * the history information.
+	 * VTYSH_HISTFILE is preferred over command line
+	 * argument (-H/--histfile).
 	 */
-	homedir = vtysh_get_home();
-	if (homedir) {
-		snprintf(history_file, sizeof(history_file), "%s/.history_frr",
-			 homedir);
+	if (histfile_env) {
+		strlcpy(history_file, histfile_env, sizeof(history_file));
+	} else if (histfile) {
+		strlcpy(history_file, histfile, sizeof(history_file));
+	} else {
+		homedir = vtysh_get_home();
+		if (homedir)
+			snprintf(history_file, sizeof(history_file),
+				 "%s/.history_frr", homedir);
+	}
+
+	if (strlen(history_file) > 0) {
 		if (read_history(history_file) != 0) {
 			int fp;
 
@@ -578,9 +644,7 @@ int main(int argc, char **argv, char **env)
 		}
 	}
 
-	if (getenv("VTYSH_LOG")) {
-		const char *logpath = getenv("VTYSH_LOG");
-
+	if (logpath != NULL) {
 		logfile = fopen(logpath, "a");
 		if (!logfile) {
 			fprintf(stderr, "Failed to open logfile (%s): %s\n",
@@ -594,6 +658,8 @@ int main(int argc, char **argv, char **env)
 		/* Enter into enable node. */
 		if (!user_mode)
 			vtysh_execute("enable");
+
+		vtysh_add_timestamp = ts_flag;
 
 		while (cmd != NULL) {
 			char *eol;
@@ -658,23 +724,6 @@ int main(int argc, char **argv, char **env)
 		exit(0);
 	}
 
-	/* Boot startup configuration file. */
-	if (boot_flag) {
-		vtysh_flock_config(frr_config);
-		ret = vtysh_read_config(frr_config);
-		vtysh_unflock_config();
-		if (ret) {
-			fprintf(stderr,
-				"Configuration file[%s] processing failure: %d\n",
-				frr_config, ret);
-			if (no_error)
-				exit(0);
-			else
-				exit(ret);
-		} else
-			exit(0);
-	}
-
 	vtysh_readline_init();
 
 	vty_hello(vty);
@@ -683,13 +732,10 @@ int main(int argc, char **argv, char **env)
 	if (!user_mode)
 		vtysh_execute("enable");
 
-	/* Preparation for longjmp() in sigtstp(). */
-	sigsetjmp(jmpbuf, 1);
-	jmpflag = 1;
+	vtysh_add_timestamp = ts_flag;
 
 	/* Main command loop. */
-	while (vtysh_rl_gets())
-		vtysh_execute(line_read);
+	vtysh_rl_run();
 
 	vtysh_uninit();
 

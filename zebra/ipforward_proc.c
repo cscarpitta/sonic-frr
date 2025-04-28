@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Fetch ipforward value by reading /proc filesystem.
  * Copyright (C) 1997 Kunihiro Ishiguro
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
@@ -30,14 +15,17 @@
 
 extern struct zebra_privs_t zserv_privs;
 
-char proc_net_snmp[] = "/proc/net/snmp";
+static const char proc_net_snmp[] = "/proc/net/snmp";
 
-static void dropline(FILE *fp)
+static bool dropline(FILE *fp)
 {
-	int c;
+	int ch;
 
-	while ((c = getc(fp)) != '\n')
-		;
+	do {
+		ch = getc(fp);
+	} while (ch != EOF && ch != '\n');
+
+	return ch != EOF;
 }
 
 int ipforward(void)
@@ -53,7 +41,10 @@ int ipforward(void)
 		return -1;
 
 	/* We don't care about the first line. */
-	dropline(fp);
+	if (!dropline(fp)) {
+		fclose(fp);
+		return 0;
+	}
 
 	/* Get ip_statistics.IpForwarding :
 	   1 => ip forwarding enabled
@@ -70,13 +61,13 @@ int ipforward(void)
 }
 
 /* char proc_ipv4_forwarding[] = "/proc/sys/net/ipv4/conf/all/forwarding"; */
-char proc_ipv4_forwarding[] = "/proc/sys/net/ipv4/ip_forward";
+static const char proc_ipv4_forwarding[] = "/proc/sys/net/ipv4/ip_forward";
 
 int ipforward_on(void)
 {
 	FILE *fp;
 
-	frr_elevate_privs(&zserv_privs) {
+	frr_with_privs(&zserv_privs) {
 
 		fp = fopen(proc_ipv4_forwarding, "w");
 
@@ -97,7 +88,7 @@ int ipforward_off(void)
 {
 	FILE *fp;
 
-	frr_elevate_privs(&zserv_privs) {
+	frr_with_privs(&zserv_privs) {
 
 		fp = fopen(proc_ipv4_forwarding, "w");
 
@@ -114,7 +105,8 @@ int ipforward_off(void)
 	return ipforward();
 }
 
-char proc_ipv6_forwarding[] = "/proc/sys/net/ipv6/conf/all/forwarding";
+static const char proc_ipv6_forwarding[] =
+	"/proc/sys/net/ipv6/conf/all/forwarding";
 
 int ipforward_ipv6(void)
 {
@@ -143,7 +135,7 @@ int ipforward_ipv6_on(void)
 {
 	FILE *fp;
 
-	frr_elevate_privs(&zserv_privs) {
+	frr_with_privs(&zserv_privs) {
 
 		fp = fopen(proc_ipv6_forwarding, "w");
 
@@ -165,7 +157,7 @@ int ipforward_ipv6_off(void)
 {
 	FILE *fp;
 
-	frr_elevate_privs(&zserv_privs) {
+	frr_with_privs(&zserv_privs) {
 
 		fp = fopen(proc_ipv6_forwarding, "w");
 

@@ -17,7 +17,10 @@ is first package install and asked)
 .. code-block:: shell
 
    pkg install git autoconf automake libtool gmake json-c pkgconf \
-      bison flex py27-pytest c-ares python3 py36-sphinx texinfo
+      bison flex py36-pytest c-ares python3.6 py36-sphinx texinfo libunwind \
+      protobuf-c
+
+.. include:: building-libunwind-note.rst
 
 Make sure there is no /usr/bin/flex preinstalled (and use the newly
 installed in /usr/local/bin): (FreeBSD frequently provides a older flex
@@ -62,9 +65,9 @@ an example)
    setenv CPPFLAGS -I/usr/local/include
    ln -s /usr/local/bin/sphinx-build-3.6 /usr/local/bin/sphinx-build
    ./configure \
-       --sysconfdir=/usr/local/etc/frr \
+       --sysconfdir=/usr/local/etc \
+       --localstatedir=/var \
        --enable-pkgsrcrcdir=/usr/pkg/share/examples/rc.d \
-       --localstatedir=/var/run/frr \
        --prefix=/usr/local \
        --enable-multipath=64 \
        --enable-user=frr \

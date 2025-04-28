@@ -1,24 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SRC-DEST Routing Table
  *
  * Copyright (C) 2017 by David Lamparter & Christian Franke,
  *                       Open Source Routing / NetDEF Inc.
  *
- * This file is part of FreeRangeRouting (FRR)
- *
- * FRR is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * FRR is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
+ * This file is part of FRRouting (FRR)
  */
 
 #ifndef _ZEBRA_SRC_DEST_TABLE_H
@@ -65,22 +52,22 @@ extern struct route_node *srcdest_rnode_get(struct route_table *table,
 extern struct route_node *srcdest_rnode_lookup(struct route_table *table,
 					       union prefixconstptr dst_pu,
 					       const struct prefix_ipv6 *src_p);
-extern void srcdest_rnode_prefixes(struct route_node *rn,
+extern void srcdest_rnode_prefixes(const struct route_node *rn,
 				   const struct prefix **p,
 				   const struct prefix **src_p);
 extern const char *srcdest2str(const struct prefix *dst_p,
 			       const struct prefix_ipv6 *src_p,
 			       char *str, int size);
-extern const char *srcdest_rnode2str(struct route_node *rn, char *str,
+extern const char *srcdest_rnode2str(const struct route_node *rn, char *str,
 				     int size);
 extern struct route_node *srcdest_route_next(struct route_node *rn);
 
-static inline int rnode_is_dstnode(struct route_node *rn)
+static inline int rnode_is_dstnode(const struct route_node *rn)
 {
 	return rn->table->delegate == &_srcdest_dstnode_delegate;
 }
 
-static inline int rnode_is_srcnode(struct route_node *rn)
+static inline int rnode_is_srcnode(const struct route_node *rn)
 {
 	return rn->table->delegate == &_srcdest_srcnode_delegate;
 }

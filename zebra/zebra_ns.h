@@ -1,23 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Zebra NS header
  * Copyright (C) 2016 Cumulus Networks, Inc.
  *                    Donald Sharp
- *
- * This file is part of Quagga.
- *
- * Quagga is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * Quagga is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 #if !defined(__ZEBRA_NS_H__)
 #define __ZEBRA_NS_H__
@@ -33,14 +18,33 @@ extern "C" {
 #endif
 
 #ifdef HAVE_NETLINK
+#include <linux/netlink.h>
+
 /* Socket interface to kernel */
 struct nlsock {
 	int sock;
 	int seq;
 	struct sockaddr_nl snl;
 	char name[64];
+
+	uint8_t *buf;
+	size_t buflen;
 };
 #endif
+
+/* Tree of interfaces: external linkage struct, and rbtree */
+PREDECL_RBTREE_UNIQ(ifp_tree);
+
+struct ifp_tree_link {
+	struct ifp_tree_item link;
+
+	ifindex_t ifindex;
+
+	struct interface *ifp;
+
+	/* Backpointer */
+	struct zebra_ns *zns;
+};
 
 struct zebra_ns {
 	/* net-ns name.  */
@@ -52,11 +56,19 @@ struct zebra_ns {
 #ifdef HAVE_NETLINK
 	struct nlsock netlink;        /* kernel messages */
 	struct nlsock netlink_cmd;    /* command channel */
-	struct nlsock netlink_dplane; /* dataplane channel */
-	struct thread *t_netlink;
+
+	/* dplane system's channels: one for outgoing programming,
+	 * for the FIB e.g., and one for incoming events from the OS.
+	 */
+	struct nlsock netlink_dplane_out;
+	struct nlsock netlink_dplane_in;
+	struct event *t_netlink;
+
+	struct nlsock ge_netlink_cmd; /* command channel for generic netlink */
 #endif
 
-	struct route_table *if_table;
+	/* Tree of interfaces in this ns */
+	struct ifp_tree_head ifp_tree;
 
 	/* Back pointer */
 	struct ns *ns;
@@ -64,13 +76,36 @@ struct zebra_ns {
 
 struct zebra_ns *zebra_ns_lookup(ns_id_t ns_id);
 
-int zebra_ns_init(const char *optional_default_name);
+/* Manage collection of ifps per-NS */
+void zebra_ns_link_ifp(struct zebra_ns *zns, struct interface *ifp);
+void zebra_ns_unlink_ifp(struct interface *ifp);
+struct interface *zebra_ns_lookup_ifp(struct zebra_ns *zns, uint32_t ifindex);
+struct interface *zebra_ns_lookup_ifp_name(struct zebra_ns *zns, const char *ifname);
+
+/* Iterate collection of ifps, calling application's callback. Callback uses
+ * return semantics from lib/ns.h: return NS_WALK_STOP to stop the iteration.
+ * Caller's 'arg' is included in each callback.
+ * The iterator returns STOP or CONTINUE also.
+ */
+int zebra_ns_ifp_walk(struct zebra_ns *zns,
+		      int (*func)(struct interface *ifp, void *arg), void *arg);
+
+/* Walk all NSes, and all ifps for each NS. */
+void zebra_ns_ifp_walk_all(int (*func)(struct interface *ifp, void *arg), void *arg);
+
+int zebra_ns_init(void);
 int zebra_ns_enable(ns_id_t ns_id, void **info);
 int zebra_ns_disabled(struct ns *ns);
-int zebra_ns_early_shutdown(struct ns *ns);
-int zebra_ns_final_shutdown(struct ns *ns);
+int zebra_ns_early_shutdown(struct ns *ns,
+			    void *param_in __attribute__((unused)),
+			    void **param_out __attribute__((unused)));
+int zebra_ns_final_shutdown(struct ns *ns,
+			    void *param_in __attribute__((unused)),
+			    void **param_out __attribute__((unused)));
+int zebra_ns_kernel_shutdown(struct ns *ns, void *param_in __attribute__((unused)),
+			     void **param_out __attribute__((unused)));
 
-int zebra_ns_config_write(struct vty *vty, struct ns *ns);
+void zebra_ns_startup_continue(struct zebra_dplane_ctx *ctx);
 
 #ifdef __cplusplus
 }

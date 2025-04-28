@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Zebra-specific error messages.
  * Copyright (C) 2018  Cumulus Networks, Inc.
  *                     Quentin Young
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
@@ -283,6 +270,39 @@ static struct log_ref ferr_zebra_err[] = {
 		.description = "Zebra received an event from inotify, but failed to read what it was.",
 		.suggestion = "Notify a developer.",
 	},
+	{
+		.code = EC_ZEBRA_NHG_TABLE_INSERT_FAILED,
+		.title =
+			"Nexthop Group Hash Table Insert Failure",
+		.description =
+			"Zebra failed in inserting a Nexthop Group into its hash tables.",
+		.suggestion =
+			"Check to see if the entry already exists or if the netlink message was parsed incorrectly."
+	},
+	{
+		.code = EC_ZEBRA_NHG_SYNC,
+		.title =
+			"Zebra's Nexthop Groups are out of sync",
+		.description =
+			"Zebra's nexthop group tables are out of sync with the nexthop groups in the fib.",
+		.suggestion =
+			"Check the current status of the kernels nexthop groups and compare it to Zebra's."
+	},
+	{
+		.code = EC_ZEBRA_NHG_FIB_UPDATE,
+		.title =
+			"Zebra failed updating the fib with Nexthop Group",
+		.description =
+			"Zebra was not able to successfully install a new nexthop group into the fib",
+		.suggestion =
+			"Check to see if the nexthop group on the route you tried to install is valid."
+	},
+	{
+		.code = EC_ZEBRA_NS_NO_DEFAULT,
+		.title = "Zebra NameSpace failed to find Default",
+		.description = "Zebra NameSpace subsystem failed to find a Default namespace during initialization.",
+		.suggestion = "Open an Issue with all relevant log files and restart FRR",
+	},
 	/* Warnings */
 	{
 		.code = EC_ZEBRAING_LM_PROTO_MISMATCH,
@@ -379,14 +399,6 @@ static struct log_ref ferr_zebra_err[] = {
 			"Zebra received a multicast IRDP packet while operating in unicast mode, or vice versa.",
 		.suggestion =
 			"If you wish to receive the messages, change your IRDP settings accordingly.",
-	},
-	{
-		.code = EC_ZEBRA_IRDP_BAD_TYPE,
-		.title =
-			"Zebra received IRDP packet with bad type",
-		.description =
-			"THIS IS BULLSHIT REMOVE ME",
-		.suggestion = "asdf",
 	},
 	{
 		.code = EC_ZEBRA_RNH_NO_TABLE,
@@ -667,7 +679,7 @@ static struct log_ref ferr_zebra_err[] = {
 	{
 		.code = EC_ZEBRA_RTM_VERSION_MISMATCH,
 		.title =
-			"Zebra received kernel message with uknown version",
+			"Zebra received kernel message with unknown version",
 		.description =
 			"Zebra received a message from the kernel with a message version that does not match Zebra's internal version. Depending on version compatibility, this may cause issues sending and receiving messages to the kernel.",
 		.suggestion =
@@ -735,6 +747,57 @@ static struct log_ref ferr_zebra_err[] = {
 			"Zebra has hit duplicate address detection threshold which means host IP is moving.",
 		.suggestion =
 			"Check network topology to detect duplicate host IP for correctness.",
+	},
+	{
+		.code = EC_ZEBRA_BAD_NHG_MESSAGE,
+		.title =
+			"Bad Nexthop Group Message",
+		.description =
+			"Zebra received Nexthop Group message from the kernel that it cannot process.",
+		.suggestion =
+			"Check the kernel's link states and routing table to see how it matches ours."
+	},
+	{
+		.code = EC_ZEBRA_DUPLICATE_NHG_MESSAGE,
+		.title =
+			"Duplicate Nexthop Group Message",
+		.description =
+			"Zebra received Nexthop Group message from the kernel that it is identical to one it/we already have but with a different ID.",
+		.suggestion =
+			"See if the nexthop you are trying to add is already present in the fib."
+	},
+	{
+		.code = EC_ZEBRA_VRF_MISCONFIGURED,
+		.title = "Duplicate VRF table id detected",
+		.description = "Zebra has detected a situation where there are two vrf devices with the exact same tableid.  This is considered a complete misconfiguration of VRF devices and breaks a fundamental assumption in FRR about how VRF's work",
+		.suggestion = "Use different table id's for the VRF's in question"
+	},
+	{
+		.code = EC_ZEBRA_SRV6M_UNRELEASED_LOCATOR_CHUNK,
+		.title = "Zebra did not free any srv6 locator chunks",
+		.description = "Zebra's srv6-locator chunk cleanup procedure ran, but no srv6 locator chunks were released.",
+		.suggestion = "Ignore this error.",
+	},
+	{
+		.code = EC_ZEBRA_INTF_UPDATE_FAILURE,
+		.title =
+			"Zebra failed to update interface in the kernel",
+		.description =
+			"Zebra made an attempt to update an interfce in the kernel, but it was not successful.",
+		.suggestion =
+			"Wait for Zebra to reattempt update.",
+	},
+	{
+		.code = EC_ZEBRA_SM_CANNOT_ASSIGN_SID,
+		.title = "SRv6 manager unable to assign SID",
+		.description = "Zebra's SRv6 manager was unable to assign a SID to client.",
+		.suggestion = "Ensure that Zebra has a sufficient SID range available.",
+	},
+	{
+		.code = EC_ZEBRA_SM_DAEMON_MISMATCH,
+		.title = "Daemon mismatch when releasing SRV6 SIDs",
+		.description = "Zebra noticed a mismatch between a SRv6 SID and a protocol daemon number or instance when releasing unused SRv6 SIDs.",
+		.suggestion = "Ignore this error.",
 	},
 	{
 		.code = END_FERR,

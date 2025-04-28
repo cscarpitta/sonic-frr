@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Very simple prng to allow for randomized tests with reproducable
  * results.
@@ -7,20 +8,6 @@
  * Copyright (C) 2017 Christian Franke
  *
  * This file is part of Quagga
- *
- * Quagga is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * Quagga is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
@@ -62,16 +49,17 @@ const char *prng_fuzz(struct prng *prng, const char *string,
 		      const char *charset, unsigned int operations)
 {
 	static char buf[256];
-	unsigned int charset_len;
+	size_t charset_len = strlen(charset);
+	size_t str_len = strlen(string);
 	unsigned int i;
 	unsigned int offset;
 	unsigned int op;
 	unsigned int character;
 
-	assert(strlen(string) < sizeof(buf));
+	assert(str_len < sizeof(buf));
 
-	strncpy(buf, string, sizeof(buf));
-	charset_len = strlen(charset);
+	memset(buf, 0, sizeof(buf));
+	memcpy(buf, string, str_len);
 
 	for (i = 0; i < operations; i++) {
 		offset = prng_rand(prng) % strlen(buf);

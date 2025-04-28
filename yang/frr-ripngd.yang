@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BSD-2-Clause
 module frr-ripngd {
   yang-version 1.1;
   namespace "http://frrouting.org/yang/ripngd";
@@ -9,21 +10,64 @@ module frr-ripngd {
   import ietf-yang-types {
     prefix yang;
   }
+  import frr-if-rmap {
+    prefix frr-if-rmap;
+  }
+  import frr-filter {
+    prefix frr-filter;
+  }
   import frr-interface {
     prefix frr-interface;
+  }
+  import frr-vrf {
+    prefix frr-vrf;
+  }
+  import frr-route-map {
+    prefix frr-route-map;
   }
   import frr-route-types {
     prefix frr-route-types;
   }
 
   organization
-    "Free Range Routing";
+    "FRRouting";
   contact
     "FRR Users List:       <mailto:frog@lists.frrouting.org>
      FRR Development List: <mailto:dev@lists.frrouting.org>";
   description
-    "This module defines a model for managing FRR ripngd daemon.";
+    "This module defines a model for managing FRR ripngd daemon.
 
+     Copyright 2020 FRRouting
+
+     Redistribution and use in source and binary forms, with or without
+     modification, are permitted provided that the following conditions
+     are met:
+
+     1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+
+     2. Redistributions in binary form must reproduce the above copyright
+     notice, this list of conditions and the following disclaimer in the
+     documentation and/or other materials provided with the distribution.
+
+     THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+     \"AS IS\" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+     LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+     A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+     HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+     SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+     LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+     DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+     THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+     (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+     OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.";
+
+  revision 2019-09-09 {
+    description
+      "Changed interface references to use
+      frr-interface:interface-ref typedef";
+    reference "FRRouting";
+  }
   revision 2018-11-27 {
     description
       "Initial revision.";
@@ -32,6 +76,7 @@ module frr-ripngd {
   }
 
   container ripngd {
+    description "ripng routing instance data";
     /*
      * Routing instance configuration.
      */
@@ -41,13 +86,13 @@ module frr-ripngd {
         "RIPng routing instance.";
 
       leaf vrf {
-        type string;
+        type frr-vrf:vrf-ref;
         description
           "VRF name.";
       }
       leaf allow-ecmp {
-        type boolean;
-        default "false";
+        type uint8;
+        default 0;
         description
           "Allow equal-cost multi-path.";
       }
@@ -71,9 +116,7 @@ module frr-ripngd {
           "Enable RIPng on the specified IPv6 network.";
       }
       leaf-list interface {
-        type string {
-          length "1..16";
-        }
+        type frr-interface:interface-ref;
         description
           "Enable RIPng on the specified interface.";
       }
@@ -82,7 +125,15 @@ module frr-ripngd {
         description
           "Offset-list to modify route metric.";
         leaf interface {
-          type string;
+          type union {
+            type frr-interface:interface-ref;
+            type enumeration {
+              enum '*' {
+                description
+                  "Match all interfaces.";
+              }
+            }
+          }
           description
             "Interface to match. Use '*' to match all interfaces.";
         }
@@ -118,27 +169,26 @@ module frr-ripngd {
         }
       }
       leaf-list passive-interface {
-        type string {
-          length "1..16";
-        }
+        type frr-interface:interface-ref;
         description
           "A list of interfaces where the sending of RIPng packets
            is disabled.";
       }
+
+      uses frr-filter:distribute-list-group;
+
       list redistribute {
         key "protocol";
         description
           "Redistributes routes learned from other routing protocols.";
         leaf protocol {
           type frr-route-types:frr-route-types-v6;
+          must '. != "ripng"';
           description
             "Routing protocol.";
-          must '. != "ripng"';
         }
         leaf route-map {
-          type string {
-            length "1..max";
-          }
+          type frr-route-map:route-map-ref;
           description
             "Applies the conditions of the specified route-map to
              routes that are redistributed into the RIPng routing
@@ -157,6 +207,9 @@ module frr-ripngd {
              is 0.";
         }
       }
+
+      uses frr-if-rmap:if-route-maps-group;
+
       leaf-list static-route {
         type inet:ipv6-prefix;
         description
@@ -264,7 +317,7 @@ module frr-ripngd {
                 "Next hop IPv6 address.";
             }
             leaf interface {
-              type string;
+              type frr-interface:interface-ref;
               description
                 "The interface that the route uses.";
             }
@@ -285,6 +338,7 @@ module frr-ripngd {
    * Per-interface configuration data
    */
   augment "/frr-interface:lib/frr-interface:interface" {
+    description "RIPng interface augmentation.";
     container ripng {
       description
         "RIPng interface parameters.";
@@ -325,7 +379,7 @@ module frr-ripngd {
 
     input {
       leaf vrf {
-        type string;
+        type frr-vrf:vrf-ref;
         description
           "VRF name identifying a specific RIPng instance.
            This leaf is optional for the rpc.

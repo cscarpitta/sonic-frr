@@ -1,10 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* NHRP packet handling functions
  * Copyright (c) 2014-2015 Timo Teräs
- *
- * This file is free software: you may copy, redistribute and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 2 of the License, or
- * (at your option) any later version.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -14,7 +10,7 @@
 #include <netinet/if_ether.h>
 #include "nhrpd.h"
 #include "zbuf.h"
-#include "thread.h"
+#include "frrevent.h"
 #include "hash.h"
 
 #include "nhrp_protocol.h"
@@ -119,14 +115,32 @@ uint16_t nhrp_packet_calculate_checksum(const uint8_t *pdu, uint16_t len)
 	return (~csum) & 0xffff;
 }
 
-void nhrp_packet_complete(struct zbuf *zb, struct nhrp_packet_header *hdr)
+void nhrp_packet_complete(struct zbuf *zb, struct nhrp_packet_header *hdr,
+			  struct interface *ifp)
 {
+	nhrp_packet_complete_auth(zb, hdr, ifp, true);
+}
+
+void nhrp_packet_complete_auth(struct zbuf *zb, struct nhrp_packet_header *hdr,
+			       struct interface *ifp, bool auth)
+{
+	struct nhrp_interface *nifp = ifp->info;
+	struct zbuf *auth_token = nifp->auth_token;
+	struct nhrp_extension_header *dst;
 	unsigned short size;
+
+	if (auth && auth_token) {
+		dst = nhrp_ext_push(zb, hdr,
+				    NHRP_EXTENSION_AUTHENTICATION |
+					    NHRP_EXTENSION_FLAG_COMPULSORY);
+		zbuf_copy_peek(zb, auth_token, zbuf_size(auth_token));
+		nhrp_ext_complete(zb, dst);
+	}
 
 	if (hdr->extension_offset)
 		nhrp_ext_push(zb, hdr,
-			      NHRP_EXTENSION_END
-				      | NHRP_EXTENSION_FLAG_COMPULSORY);
+			      NHRP_EXTENSION_END |
+				      NHRP_EXTENSION_FLAG_COMPULSORY);
 
 	size = zb->tail - (uint8_t *)hdr;
 	hdr->packet_size = htons(size);
@@ -229,8 +243,7 @@ struct nhrp_extension_header *nhrp_ext_pull(struct zbuf *zb,
 	return ext;
 }
 
-void nhrp_ext_request(struct zbuf *zb, struct nhrp_packet_header *hdr,
-		      struct interface *ifp)
+void nhrp_ext_request(struct zbuf *zb, struct nhrp_packet_header *hdr)
 {
 	/* Place holders for standard extensions */
 	nhrp_ext_push(zb, hdr,
@@ -268,12 +281,13 @@ int nhrp_ext_reply(struct zbuf *zb, struct nhrp_packet_header *hdr,
 				    &ad->addr);
 		if (!cie)
 			goto err;
+		cie->mtu = htons(ad->mtu);
 		cie->holding_time = htons(ad->holdtime);
 		break;
 	default:
 		if (type & NHRP_EXTENSION_FLAG_COMPULSORY)
 			goto err;
-	/* fallthru */
+		fallthrough;
 	case NHRP_EXTENSION_FORWARD_TRANSIT_NHS:
 	case NHRP_EXTENSION_REVERSE_TRANSIT_NHS:
 		/* Supported compulsory extensions, and any
@@ -289,9 +303,9 @@ err:
 	return -1;
 }
 
-static int nhrp_packet_recvraw(struct thread *t)
+static void nhrp_packet_recvraw(struct event *t)
 {
-	int fd = THREAD_FD(t), ifindex;
+	int fd = EVENT_FD(t), ifindex;
 	struct zbuf *zb;
 	struct interface *ifp;
 	struct nhrp_peer *p;
@@ -299,11 +313,11 @@ static int nhrp_packet_recvraw(struct thread *t)
 	uint8_t addr[64];
 	size_t len, addrlen;
 
-	thread_add_read(master, nhrp_packet_recvraw, 0, fd, NULL);
+	event_add_read(master, nhrp_packet_recvraw, 0, fd, NULL);
 
 	zb = zbuf_alloc(1500);
 	if (!zb)
-		return 0;
+		return;
 
 	len = zbuf_size(zb);
 	addrlen = sizeof(addr);
@@ -331,15 +345,14 @@ static int nhrp_packet_recvraw(struct thread *t)
 
 	nhrp_peer_recv(p, zb);
 	nhrp_peer_unref(p);
-	return 0;
+	return;
 
 err:
 	zbuf_free(zb);
-	return 0;
 }
 
 int nhrp_packet_init(void)
 {
-	thread_add_read(master, nhrp_packet_recvraw, 0, os_socket(), NULL);
+	event_add_read(master, nhrp_packet_recvraw, 0, os_socket(), NULL);
 	return 0;
 }

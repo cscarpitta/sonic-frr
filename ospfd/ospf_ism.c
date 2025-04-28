@@ -1,28 +1,13 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * OSPF version 2  Interface State Machine
  *   From RFC2328 [OSPF Version 2]
  * Copyright (C) 1999, 2000 Toshiaki Takada
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
 
-#include "thread.h"
+#include "frrevent.h"
 #include "linklist.h"
 #include "prefix.h"
 #include "if.h"
@@ -45,7 +30,7 @@
 
 DEFINE_HOOK(ospf_ism_change,
 	    (struct ospf_interface * oi, int state, int oldstate),
-	    (oi, state, oldstate))
+	    (oi, state, oldstate));
 
 /* elect DR and BDR. Refer to RFC2319 section 9.4 */
 static struct ospf_neighbor *ospf_dr_election_sub(struct list *routers)
@@ -169,7 +154,7 @@ static void ospf_dr_eligible_routers(struct route_table *nbrs,
 	for (rn = route_top(nbrs); rn; rn = route_next(rn))
 		if ((nbr = rn->info) != NULL)
 			/* Ignore 0.0.0.0 node*/
-			if (nbr->router_id.s_addr != 0)
+			if (nbr->router_id.s_addr != INADDR_ANY)
 				/* Is neighbor eligible? */
 				if (nbr->priority > 0)
 					/* Is neighbor upper 2-Way? */
@@ -183,20 +168,25 @@ static void ospf_dr_change(struct ospf *ospf, struct route_table *nbrs)
 	struct route_node *rn;
 	struct ospf_neighbor *nbr;
 
-	for (rn = route_top(nbrs); rn; rn = route_next(rn))
-		if ((nbr = rn->info) != NULL)
-			/* Ignore 0.0.0.0 node*/
-			if (nbr->router_id.s_addr != 0)
-				/* Is neighbor upper 2-Way? */
-				if (nbr->state >= NSM_TwoWay)
-					/* Ignore myself. */
-					if (!IPV4_ADDR_SAME(&nbr->router_id,
-							    &ospf->router_id))
-						OSPF_NSM_EVENT_SCHEDULE(
-							nbr, NSM_AdjOK);
+	for (rn = route_top(nbrs); rn; rn = route_next(rn)) {
+		nbr = rn->info;
+
+		if (!nbr)
+			continue;
+
+		/*
+		 * Ignore 0.0.0.0 node
+		 * Is neighbor 2-Way?
+		 * Ignore myself
+		 */
+		if (nbr->router_id.s_addr != INADDR_ANY
+		    && nbr->state >= NSM_TwoWay
+		    && !IPV4_ADDR_SAME(&nbr->router_id, &ospf->router_id))
+			OSPF_NSM_EVENT_SCHEDULE(nbr, NSM_AdjOK);
+	}
 }
 
-static int ospf_dr_election(struct ospf_interface *oi)
+int ospf_dr_election(struct ospf_interface *oi)
 {
 	struct in_addr old_dr, old_bdr;
 	int old_state, new_state;
@@ -218,8 +208,10 @@ static int ospf_dr_election(struct ospf_interface *oi)
 
 	new_state = ospf_ism_state(oi);
 
-	zlog_debug("DR-Election[1st]: Backup %s", inet_ntoa(BDR(oi)));
-	zlog_debug("DR-Election[1st]: DR     %s", inet_ntoa(DR(oi)));
+	if (IS_DEBUG_OSPF(ism, ISM_STATUS)) {
+		zlog_debug("DR-Election[1st]: Backup %pI4", &BDR(oi));
+		zlog_debug("DR-Election[1st]: DR     %pI4", &DR(oi));
+	}
 
 	if (new_state != old_state
 	    && !(new_state == ISM_DROther && old_state < ISM_DROther)) {
@@ -228,8 +220,10 @@ static int ospf_dr_election(struct ospf_interface *oi)
 
 		new_state = ospf_ism_state(oi);
 
-		zlog_debug("DR-Election[2nd]: Backup %s", inet_ntoa(BDR(oi)));
-		zlog_debug("DR-Election[2nd]: DR     %s", inet_ntoa(DR(oi)));
+		if (IS_DEBUG_OSPF(ism, ISM_STATUS)) {
+			zlog_debug("DR-Election[2nd]: Backup %pI4", &BDR(oi));
+			zlog_debug("DR-Election[2nd]: DR     %pI4", &DR(oi));
+		}
 	}
 
 	list_delete(&el_list);
@@ -243,12 +237,16 @@ static int ospf_dr_election(struct ospf_interface *oi)
 }
 
 
-int ospf_hello_timer(struct thread *thread)
+void ospf_hello_timer(struct event *thread)
 {
 	struct ospf_interface *oi;
 
-	oi = THREAD_ARG(thread);
+	oi = EVENT_ARG(thread);
 	oi->t_hello = NULL;
+
+	/* Check if the GR hello-delay is active. */
+	if (oi->gr.hello_delay.t_grace_send)
+		return;
 
 	if (IS_DEBUG_OSPF(ism, ISM_TIMERS))
 		zlog_debug("ISM[%s]: Timer (Hello timer expire)", IF_NAME(oi));
@@ -258,23 +256,19 @@ int ospf_hello_timer(struct thread *thread)
 
 	/* Hello timer set. */
 	OSPF_HELLO_TIMER_ON(oi);
-
-	return 0;
 }
 
-static int ospf_wait_timer(struct thread *thread)
+static void ospf_wait_timer(struct event *thread)
 {
 	struct ospf_interface *oi;
 
-	oi = THREAD_ARG(thread);
+	oi = EVENT_ARG(thread);
 	oi->t_wait = NULL;
 
 	if (IS_DEBUG_OSPF(ism, ISM_TIMERS))
 		zlog_debug("ISM[%s]: Timer (Wait timer expire)", IF_NAME(oi));
 
 	OSPF_ISM_EVENT_SCHEDULE(oi, ISM_WaitTimer);
-
-	return 0;
 }
 
 /* Hook function called after ospf ISM event is occurred. And vty's
@@ -289,16 +283,18 @@ static void ism_timer_set(struct ospf_interface *oi)
 		   interface parameters must be set to initial values, and
 		   timers are
 		   reset also. */
-		OSPF_ISM_TIMER_OFF(oi->t_hello);
-		OSPF_ISM_TIMER_OFF(oi->t_wait);
-		OSPF_ISM_TIMER_OFF(oi->t_ls_ack);
+		EVENT_OFF(oi->t_hello);
+		EVENT_OFF(oi->t_wait);
+		EVENT_OFF(oi->t_ls_ack_delayed);
+		EVENT_OFF(oi->gr.hello_delay.t_grace_send);
 		break;
 	case ISM_Loopback:
 		/* In this state, the interface may be looped back and will be
 		   unavailable for regular data traffic. */
-		OSPF_ISM_TIMER_OFF(oi->t_hello);
-		OSPF_ISM_TIMER_OFF(oi->t_wait);
-		OSPF_ISM_TIMER_OFF(oi->t_ls_ack);
+		EVENT_OFF(oi->t_hello);
+		EVENT_OFF(oi->t_wait);
+		EVENT_OFF(oi->t_ls_ack_delayed);
+		EVENT_OFF(oi->gr.hello_delay.t_grace_send);
 		break;
 	case ISM_Waiting:
 		/* The router is trying to determine the identity of DRouter and
@@ -308,7 +304,7 @@ static void ism_timer_set(struct ospf_interface *oi)
 		OSPF_ISM_TIMER_MSEC_ON(oi->t_hello, ospf_hello_timer, 1);
 		OSPF_ISM_TIMER_ON(oi->t_wait, ospf_wait_timer,
 				  OSPF_IF_PARAM(oi, v_wait));
-		OSPF_ISM_TIMER_OFF(oi->t_ls_ack);
+		EVENT_OFF(oi->t_ls_ack_delayed);
 		break;
 	case ISM_PointToPoint:
 		/* The interface connects to a physical Point-to-point network
@@ -317,9 +313,7 @@ static void ism_timer_set(struct ospf_interface *oi)
 		   neighboring router. Hello packets are also sent. */
 		/* send first hello immediately */
 		OSPF_ISM_TIMER_MSEC_ON(oi->t_hello, ospf_hello_timer, 1);
-		OSPF_ISM_TIMER_OFF(oi->t_wait);
-		OSPF_ISM_TIMER_ON(oi->t_ls_ack, ospf_ls_ack_timer,
-				  oi->v_ls_ack);
+		EVENT_OFF(oi->t_wait);
 		break;
 	case ISM_DROther:
 		/* The network type of the interface is broadcast or NBMA
@@ -327,27 +321,21 @@ static void ism_timer_set(struct ospf_interface *oi)
 		   and the router itself is neither Designated Router nor
 		   Backup Designated Router. */
 		OSPF_HELLO_TIMER_ON(oi);
-		OSPF_ISM_TIMER_OFF(oi->t_wait);
-		OSPF_ISM_TIMER_ON(oi->t_ls_ack, ospf_ls_ack_timer,
-				  oi->v_ls_ack);
+		EVENT_OFF(oi->t_wait);
 		break;
 	case ISM_Backup:
 		/* The network type of the interface is broadcast os NBMA
 		   network,
 		   and the router is Backup Designated Router. */
 		OSPF_HELLO_TIMER_ON(oi);
-		OSPF_ISM_TIMER_OFF(oi->t_wait);
-		OSPF_ISM_TIMER_ON(oi->t_ls_ack, ospf_ls_ack_timer,
-				  oi->v_ls_ack);
+		EVENT_OFF(oi->t_wait);
 		break;
 	case ISM_DR:
 		/* The network type of the interface is broadcast or NBMA
 		   network,
 		   and the router is Designated Router. */
 		OSPF_HELLO_TIMER_ON(oi);
-		OSPF_ISM_TIMER_OFF(oi->t_wait);
-		OSPF_ISM_TIMER_ON(oi->t_ls_ack, ospf_ls_ack_timer,
-				  oi->v_ls_ack);
+		EVENT_OFF(oi->t_wait);
 		break;
 	}
 }
@@ -371,7 +359,7 @@ static int ism_interface_up(struct ospf_interface *oi)
 		/* Otherwise, the state transitions to Waiting. */
 		next_state = ISM_Waiting;
 
-	if (oi->type == OSPF_IFTYPE_NBMA)
+	if (OSPF_IF_NON_BROADCAST(oi))
 		ospf_nbr_nbma_if_update(oi->ospf, oi);
 
 	/*  ospf_ism_event (t); */
@@ -418,7 +406,7 @@ static int ism_ignore(struct ospf_interface *oi)
 }
 
 /* Interface State Machine */
-struct {
+const struct {
 	int (*func)(struct ospf_interface *);
 	int next_state;
 } ISM[OSPF_ISM_STATE_MAX][OSPF_ISM_EVENT_MAX] = {
@@ -512,7 +500,7 @@ struct {
 	},
 };
 
-static const char *ospf_ism_event_str[] = {
+static const char *const ospf_ism_event_str[] = {
 	"NoEvent",	"InterfaceUp", "WaitTimer", "BackupSeen",
 	"NeighborChange", "LoopInd",     "UnLoopInd", "InterfaceDown",
 };
@@ -570,14 +558,14 @@ static void ism_change_state(struct ospf_interface *oi, int state)
 }
 
 /* Execute ISM event process. */
-int ospf_ism_event(struct thread *thread)
+void ospf_ism_event(struct event *thread)
 {
 	int event;
 	int next_state;
 	struct ospf_interface *oi;
 
-	oi = THREAD_ARG(thread);
-	event = THREAD_VAL(thread);
+	oi = EVENT_ARG(thread);
+	event = EVENT_VAL(thread);
 
 	/* Call function. */
 	next_state = (*(ISM[oi->state][event].func))(oi);
@@ -596,6 +584,4 @@ int ospf_ism_event(struct thread *thread)
 
 	/* Make sure timer is set. */
 	ism_timer_set(oi);
-
-	return 0;
 }

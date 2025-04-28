@@ -3,19 +3,23 @@
 OSPF Fundamentals
 =================
 
-.. index:: Link-state routing protocol
-.. index:: Distance-vector routing protocol
+.. index::
+   pair: Link-state routing protocol; OSPF
+   pair: Distance-vector routing protocol; OSPF
+
 
 :abbr:`OSPF` is, mostly, a link-state routing protocol. In contrast to
 :term:`distance-vector` protocols, such as :abbr:`RIP` or :abbr:`BGP`, where
 routers describe available `paths` (i.e. routes) to each other, in
 :term:`link-state` protocols routers instead describe the state of their links
-to their immediate neighbouring routers.
+to their immediate neighboring routers.
 
-.. index:: Link State Announcement
-.. index:: Link State Advertisement
-.. index:: LSA flooding
-.. index:: Link State Database
+.. index::
+   single: Link State Announcement
+   single: Link State Advertisement
+   single: LSA flooding
+   single: Link State Database
+
 
 Each router describes their link-state information in a message known as an
 :abbr:`LSA (Link State Advertisement)`, which is then propagated through to all
@@ -24,10 +28,11 @@ Each router thus builds up an :abbr:`LSDB (Link State Database)` of all the
 link-state messages. From this collection of LSAs in the LSDB, each router can
 then calculate the shortest path to any other router, based on some common
 metric, by using an algorithm such as
-`Edgar Djikstra's <http://www.cs.utexas.edu/users/EWD/>`_
+`Edsger Dijkstra's <http://www.cs.utexas.edu/users/EWD/>`_
 :abbr:`SPF (Shortest Path First)` algorithm.
 
-.. index:: Link-state routing protocol advantages
+.. index::
+   pair: Link-state routing protocol; advantages
 
 By describing connectivity of a network in this way, in terms of
 routers and links rather than in terms of the paths through a network,
@@ -39,7 +44,8 @@ reconverge on the best paths through the network. In contrast, distance
 vector protocols can require a progression of different path update
 messages from a series of different routers in order to converge.
 
-.. index:: Link-state routing protocol disadvantages
+.. index::
+   pair: Link-state routing protocol; disadvantages
 
 The disadvantage to a link-state protocol is that the process of
 computing the best paths can be relatively intensive when compared to
@@ -64,7 +70,8 @@ will nearly all be covered in greater detail further on. They may be
 broadly classed as:
 
 
-.. index:: OSPF Hello Protocol
+.. index::
+   pair: Hello protocol; OSPF
 
 The Hello Protocol
 ^^^^^^^^^^^^^^^^^^
@@ -83,10 +90,13 @@ sharing a link, for example:
 - DR/BDR election results.
 - Any optional capabilities supported by each router.
 
-The Hello protocol is comparatively trivial and will not be explored in greater
-detail than here.
+The Hello protocol is comparatively trivial and will not be explored in more
+detail.
 
-.. index:: OSPF LSA overview
+
+.. index::
+   pair: LSA; OSPF
+
 .. _ospf-lsas:
 
 LSAs
@@ -117,10 +127,12 @@ LSA Flooding
 """"""""""""
 
 OSPF defines several related mechanisms, used to manage synchronisation of
-:abbr:`LSDB` s between neighbours as neighbours form adjacencies and the
+:abbr:`LSDB` s between neighbors as neighbors form adjacencies and the
 propagation, or `flooding` of new or updated :abbr:`LSA` s.
 
-.. index:: OSPF Areas overview
+
+.. index::
+   pair: Area; OSPF
 
 .. _ospf-areas:
 
@@ -233,7 +245,7 @@ called `intra-area routes`.
 
   Cost
      The output cost of that interface, scaled inversely to some commonly known
-     reference value, :clicmd:`auto-cost reference-bandwidth (1-4294967`.
+     reference value, :clicmd:`auto-cost reference-bandwidth (1-4294967)`.
 
   Link Type
      Transit Network
@@ -247,7 +259,7 @@ called `intra-area routes`.
      LSA is originated for such a link.
 
      Stub
-        A link with no adjacent neighbours, or a host route.
+        A link with no adjacent neighbors, or a host route.
 
   - Link ID and Data
 
@@ -273,7 +285,7 @@ called `intra-area routes`.
 
     Stub links may also be used as a way to describe links on which OSPF is
     *not* spoken, known as `passive interfaces`, see
-    :clicmd:`passive-interface INTERFACE`.
+    :clicmd:`ip ospf passive [A.B.C.D]`.
 
 - Network LSA
 
@@ -327,8 +339,8 @@ The example below shows two :abbr:`LSA` s, both originated by the same router
 of different LSA types.
 
 The first LSA being the router LSA describing 192.168.0.49's links: 2 links
-to multi-access networks with fully-adjacent neighbours (i.e. Transit
-links) and 1 being a Stub link (no adjacent neighbours).
+to multi-access networks with fully-adjacent neighbors (i.e. Transit
+links) and 1 being a Stub link (no adjacent neighbors).
 
 The second LSA being a Network LSA, for which 192.168.0.49 is the
 :abbr:`DR`, listing the Router IDs of 4 routers on that network which

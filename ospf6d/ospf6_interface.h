@@ -1,21 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2003 Yasuhiro Ohara
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #ifndef OSPF6_INTERFACE_H
@@ -24,12 +9,49 @@
 #include "qobj.h"
 #include "hook.h"
 #include "if.h"
+#include "ospf6d.h"
+
+DECLARE_MTYPE(OSPF6_AUTH_MANUAL_KEY);
 
 /* Debug option */
 extern unsigned char conf_debug_ospf6_interface;
 #define OSPF6_DEBUG_INTERFACE_ON() (conf_debug_ospf6_interface = 1)
 #define OSPF6_DEBUG_INTERFACE_OFF() (conf_debug_ospf6_interface = 0)
 #define IS_OSPF6_DEBUG_INTERFACE (conf_debug_ospf6_interface)
+
+struct ospf6_auth_data {
+	/* config data */
+	uint8_t hash_algo; /* hash algorithm type */
+	uint16_t key_id;   /* key-id used as SA in auth packet */
+	char *auth_key;    /* Auth key */
+	char *keychain;    /* keychain name */
+
+	/* operational data */
+	uint8_t flags; /* Flags related to auth config */
+
+	/* Counters and Statistics */
+	uint32_t tx_drop; /* Pkt drop due to auth fail while sending */
+	uint32_t rx_drop; /* Pkt drop due to auth fail while reading */
+};
+
+PREDECL_RBTREE_UNIQ(ospf6_if_p2xp_neighcfgs);
+
+struct ospf6_if_p2xp_neighcfg {
+	struct ospf6_if_p2xp_neighcfgs_item item;
+
+	struct ospf6_interface *ospf6_if;
+	struct in6_addr addr;
+
+	bool cfg_cost : 1;
+
+	uint32_t cost;
+	uint16_t poll_interval;
+
+	/* NULL if down */
+	struct ospf6_neighbor *active;
+
+	struct event *t_unicast_hello;
+};
 
 /* Interface structure */
 struct ospf6_interface {
@@ -38,6 +60,9 @@ struct ospf6_interface {
 
 	/* back pointer */
 	struct ospf6_area *area;
+
+	uint32_t area_id;
+	int area_id_format;
 
 	/* list of ospf6 neighbor */
 	struct list *neighbor_list;
@@ -53,8 +78,26 @@ struct ospf6_interface {
 	/* I/F transmission delay */
 	uint32_t transdelay;
 
+	/* Packet send buffer. */
+	struct ospf6_fifo *obuf; /* Output queue */
+
 	/* Network Type */
 	uint8_t type;
+	bool type_cfg;
+
+	/* P2P/P2MP behavior: */
+
+	/* disable hellos on standard multicast? */
+	bool p2xp_no_multicast_hello;
+	/* only allow explicitly configured neighbors? */
+	bool p2xp_only_cfg_neigh;
+	/* override mode default for advertising connected prefixes.
+	 * both false by default (= do include for PtP, exclude for PtMP)
+	 */
+	bool p2xp_connected_pfx_include;
+	bool p2xp_connected_pfx_exclude;
+
+	struct ospf6_if_p2xp_neighcfgs_head p2xp_neighs;
 
 	/* Router Priority */
 	uint8_t priority;
@@ -63,6 +106,15 @@ struct ospf6_interface {
 	uint16_t hello_interval;
 	uint16_t dead_interval;
 	uint32_t rxmt_interval;
+
+	/* Graceful-Restart data. */
+	struct {
+		struct {
+			uint16_t interval;
+			uint16_t elapsed_seconds;
+			struct event *t_grace_send;
+		} hello_delay;
+	} gr;
 
 	uint32_t state_change;
 
@@ -80,7 +132,7 @@ struct ospf6_interface {
 
 	/* Interface socket setting trial counter, resets on success */
 	uint8_t sso_try_cnt;
-	struct thread *thread_sso;
+	struct event *thread_sso;
 
 	/* OSPF6 Interface flag */
 	char flag;
@@ -88,11 +140,14 @@ struct ospf6_interface {
 	/* MTU mismatch check */
 	uint8_t mtu_ignore;
 
+	/* Authentication trailer related config */
+	struct ospf6_auth_data at_data;
+
 	/* Decision of DR Election */
-	uint32_t drouter;
-	uint32_t bdrouter;
-	uint32_t prev_drouter;
-	uint32_t prev_bdrouter;
+	in_addr_t drouter;
+	in_addr_t bdrouter;
+	in_addr_t prev_drouter;
+	in_addr_t prev_bdrouter;
 
 	/* Linklocal LSA Database: includes Link-LSA */
 	struct ospf6_lsdb *lsdb;
@@ -102,22 +157,34 @@ struct ospf6_interface {
 	struct ospf6_lsdb *lsack_list;
 
 	/* Ongoing Tasks */
-	struct thread *thread_send_hello;
-	struct thread *thread_send_lsupdate;
-	struct thread *thread_send_lsack;
+	struct event *thread_send_hello;
+	struct event *thread_send_lsupdate;
+	struct event *thread_send_lsack;
 
-	struct thread *thread_network_lsa;
-	struct thread *thread_link_lsa;
-	struct thread *thread_intra_prefix_lsa;
-	struct thread *thread_as_extern_lsa;
+	struct event *thread_network_lsa;
+	struct event *thread_link_lsa;
+	struct event *thread_intra_prefix_lsa;
+	struct event *thread_as_extern_lsa;
+	struct event *thread_wait_timer;
 
 	struct ospf6_route_table *route_connected;
+
+	/* last hello sent */
+	struct timeval last_hello;
 
 	/* prefix-list name to filter connected prefix */
 	char *plist_name;
 
 	/* BFD information */
-	void *bfd_info;
+	struct {
+		bool enabled;
+		uint8_t detection_multiplier;
+		uint32_t min_rx;
+		uint32_t min_tx;
+		char *profile;
+	} bfd_config;
+
+	int on_write_q;
 
 	/* Statistics Fields */
 	uint32_t hello_in;
@@ -132,22 +199,23 @@ struct ospf6_interface {
 	uint32_t ls_ack_out;
 	uint32_t discarded;
 
-	QOBJ_FIELDS
+	QOBJ_FIELDS;
 };
-DECLARE_QOBJ_TYPE(ospf6_interface)
+DECLARE_QOBJ_TYPE(ospf6_interface);
 
 /* interface state */
-#define OSPF6_INTERFACE_NONE             0
-#define OSPF6_INTERFACE_DOWN             1
-#define OSPF6_INTERFACE_LOOPBACK         2
-#define OSPF6_INTERFACE_WAITING          3
-#define OSPF6_INTERFACE_POINTTOPOINT     4
-#define OSPF6_INTERFACE_DROTHER          5
-#define OSPF6_INTERFACE_BDR              6
-#define OSPF6_INTERFACE_DR               7
-#define OSPF6_INTERFACE_MAX              8
+#define OSPF6_INTERFACE_NONE               0
+#define OSPF6_INTERFACE_DOWN               1
+#define OSPF6_INTERFACE_LOOPBACK           2
+#define OSPF6_INTERFACE_WAITING            3
+#define OSPF6_INTERFACE_POINTTOPOINT       4
+#define OSPF6_INTERFACE_POINTTOMULTIPOINT  5
+#define OSPF6_INTERFACE_DROTHER            6
+#define OSPF6_INTERFACE_BDR                7
+#define OSPF6_INTERFACE_DR                 8
+#define OSPF6_INTERFACE_MAX                9
 
-extern const char *ospf6_interface_state_str[];
+extern const char *const ospf6_interface_state_str[];
 
 /* flags */
 #define OSPF6_INTERFACE_DISABLE      0x01
@@ -163,39 +231,50 @@ extern const char *ospf6_interface_state_str[];
 #define OSPF6_INTERFACE_TRANSDELAY     1
 #define OSPF6_INTERFACE_INSTANCE_ID    0
 #define OSPF6_INTERFACE_BANDWIDTH      10000   /* Mbps */
-#define OSPF6_REFERENCE_BANDWIDTH      100000  /* Mbps */
+#define OSPF6_REFERENCE_BANDWIDTH      100000  /* Kbps */
 #define OSPF6_INTERFACE_SSO_RETRY_INT  1
 #define OSPF6_INTERFACE_SSO_RETRY_MAX  5
 
 /* Function Prototypes */
 
-extern struct ospf6_interface *ospf6_interface_lookup_by_ifindex(ifindex_t);
-extern struct ospf6_interface *ospf6_interface_create(struct interface *);
-extern void ospf6_interface_delete(struct ospf6_interface *);
+extern void ospf6_interface_start(struct ospf6_interface *oi);
+extern void ospf6_interface_stop(struct ospf6_interface *oi);
 
-extern void ospf6_interface_enable(struct ospf6_interface *);
-extern void ospf6_interface_disable(struct ospf6_interface *);
+extern struct ospf6_interface *
+ospf6_interface_lookup_by_ifindex(ifindex_t, vrf_id_t vrf_id);
+extern struct ospf6_interface *ospf6_interface_create(struct interface *ifp);
+extern void ospf6_interface_delete(struct ospf6_interface *oi);
 
-extern void ospf6_interface_if_add(struct interface *);
-extern void ospf6_interface_state_update(struct interface *);
-extern void ospf6_interface_connected_route_update(struct interface *);
+extern void ospf6_interface_enable(struct ospf6_interface *oi);
+extern void ospf6_interface_disable(struct ospf6_interface *oi);
+
+extern void ospf6_interface_state_update(struct interface *ifp);
+extern void ospf6_interface_connected_route_update(struct interface *ifp);
+extern struct in6_addr *
+ospf6_interface_get_global_address(struct interface *ifp);
 
 /* interface event */
-extern int interface_up(struct thread *);
-extern int interface_down(struct thread *);
-extern int wait_timer(struct thread *);
-extern int backup_seen(struct thread *);
-extern int neighbor_change(struct thread *);
+extern void interface_up(struct event *thread);
+extern void interface_down(struct event *thread);
+extern void wait_timer(struct event *thread);
+extern void backup_seen(struct event *thread);
+extern void neighbor_change(struct event *thread);
 
 extern void ospf6_interface_init(void);
+extern void ospf6_interface_clear(struct interface *ifp);
 
 extern void install_element_ospf6_clear_interface(void);
 
 extern int config_write_ospf6_debug_interface(struct vty *vty);
 extern void install_element_ospf6_debug_interface(void);
+extern int ospf6_interface_neighbor_count(struct ospf6_interface *oi);
+extern uint8_t dr_election(struct ospf6_interface *oi);
 
+extern void ospf6_interface_auth_trailer_cmd_init(void);
+extern void ospf6_auth_write_config(struct vty *vty,
+				    struct ospf6_auth_data *at_data);
 DECLARE_HOOK(ospf6_interface_change,
 	     (struct ospf6_interface * oi, int state, int old_state),
-	     (oi, state, old_state))
+	     (oi, state, old_state));
 
 #endif /* OSPF6_INTERFACE_H */

@@ -1,43 +1,33 @@
+// SPDX-License-Identifier: ISC
 /*	$OpenBSD$ */
 
 /*
  * Copyright (c) 2013, 2016 Renato Westphal <renato@openbsd.org>
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
- *
- * Permission to use, copy, modify, and distribute this software for any
- * purpose with or without fee is hereby granted, provided that the above
- * copyright notice and this permission notice appear in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
- * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #include <zebra.h>
 
 #include "ldpd.h"
+#include "ldpe.h"
 #include "lde.h"
 #include "log.h"
+#include "rlfa.h"
 
 #include "mpls.h"
 
 static __inline int	 fec_compare(const struct fec *, const struct fec *);
-static int		 lde_nbr_is_nexthop(struct fec_node *,
-			    struct lde_nbr *);
-static void		 fec_free(void *);
-static struct fec_node	*fec_add(struct fec *fec);
-static struct fec_nh	*fec_nh_add(struct fec_node *, int, union ldpd_addr *,
-			    ifindex_t, uint8_t);
-static void		 fec_nh_del(struct fec_nh *);
+static int	 lde_nbr_is_nexthop(struct fec_node *, struct lde_nbr *);
+static void	 fec_free(void *);
+static struct fec_node	 *fec_add(struct fec *fec);
+static struct fec_nh	 *fec_nh_add(struct fec_node *, int, union ldpd_addr *,
+			    ifindex_t, uint8_t, unsigned short);
+static void	 fec_nh_del(struct fec_nh *);
 
 RB_GENERATE(fec_tree, fec, entry, fec_compare)
 
-struct fec_tree		 ft = RB_INITIALIZER(&ft);
-struct thread		*gc_timer;
+struct fec_tree	 ft = RB_INITIALIZER(&ft);
+struct event *gc_timer;
 
 /* FEC tree functions */
 void
@@ -56,11 +46,9 @@ fec_compare(const struct fec *a, const struct fec *b)
 
 	switch (a->type) {
 	case FEC_TYPE_IPV4:
-		if (ntohl(a->u.ipv4.prefix.s_addr) <
-		    ntohl(b->u.ipv4.prefix.s_addr))
+		if (ntohl(a->u.ipv4.prefix.s_addr) < ntohl(b->u.ipv4.prefix.s_addr))
 			return (-1);
-		if (ntohl(a->u.ipv4.prefix.s_addr) >
-		    ntohl(b->u.ipv4.prefix.s_addr))
+		if (ntohl(a->u.ipv4.prefix.s_addr) > ntohl(b->u.ipv4.prefix.s_addr))
 			return (1);
 		if (a->u.ipv4.prefixlen < b->u.ipv4.prefixlen)
 			return (-1);
@@ -88,11 +76,9 @@ fec_compare(const struct fec *a, const struct fec *b)
 			return (-1);
 		if (a->u.pwid.pwid > b->u.pwid.pwid)
 			return (1);
-		if (ntohl(a->u.pwid.lsr_id.s_addr) <
-		    ntohl(b->u.pwid.lsr_id.s_addr))
+		if (ntohl(a->u.pwid.lsr_id.s_addr) < ntohl(b->u.pwid.lsr_id.s_addr))
 			return (-1);
-		if (ntohl(a->u.pwid.lsr_id.s_addr) >
-		    ntohl(b->u.pwid.lsr_id.s_addr))
+		if (ntohl(a->u.pwid.lsr_id.s_addr) > ntohl(b->u.pwid.lsr_id.s_addr))
 			return (1);
 		return (0);
 	}
@@ -176,7 +162,7 @@ rt_dump(pid_t pid)
 			rtctl.prefix.v6 = fn->fec.u.ipv6.prefix;
 			rtctl.prefixlen = fn->fec.u.ipv6.prefixlen;
 			break;
-		default:
+		case FEC_TYPE_PWID:
 			continue;
 		}
 
@@ -266,16 +252,18 @@ fec_add(struct fec *fec)
 	RB_INIT(lde_map_head, &fn->downstream);
 	LIST_INIT(&fn->nexthops);
 
+	if (fec->type == FEC_TYPE_PWID)
+		fn->pw_remote_status = PW_FORWARDING;
+
 	if (fec_insert(&ft, &fn->fec))
-		log_warnx("failed to add %s to ft tree",
-		    log_fec(&fn->fec));
+		log_warnx("failed to add %s to ft tree", log_fec(&fn->fec));
 
 	return (fn);
 }
 
 struct fec_nh *
 fec_nh_find(struct fec_node *fn, int af, union ldpd_addr *nexthop,
-    ifindex_t ifindex, uint8_t priority)
+    ifindex_t ifindex, uint8_t route_type, unsigned short route_instance)
 {
 	struct fec_nh	*fnh;
 
@@ -283,7 +271,8 @@ fec_nh_find(struct fec_node *fn, int af, union ldpd_addr *nexthop,
 		if (fnh->af == af &&
 		    ldp_addrcmp(af, &fnh->nexthop, nexthop) == 0 &&
 		    fnh->ifindex == ifindex &&
-		    fnh->priority == priority)
+		    fnh->route_type == route_type &&
+		    fnh->route_instance == route_instance)
 			return (fnh);
 
 	return (NULL);
@@ -291,7 +280,7 @@ fec_nh_find(struct fec_node *fn, int af, union ldpd_addr *nexthop,
 
 static struct fec_nh *
 fec_nh_add(struct fec_node *fn, int af, union ldpd_addr *nexthop,
-    ifindex_t ifindex, uint8_t priority)
+    ifindex_t ifindex, uint8_t route_type, unsigned short route_instance)
 {
 	struct fec_nh	*fnh;
 
@@ -303,7 +292,8 @@ fec_nh_add(struct fec_node *fn, int af, union ldpd_addr *nexthop,
 	fnh->nexthop = *nexthop;
 	fnh->ifindex = ifindex;
 	fnh->remote_label = NO_LABEL;
-	fnh->priority = priority;
+	fnh->route_type = route_type;
+	fnh->route_instance = route_instance;
 	LIST_INSERT_HEAD(&fn->nexthops, fnh, entry);
 
 	return (fnh);
@@ -318,10 +308,12 @@ fec_nh_del(struct fec_nh *fnh)
 
 void
 lde_kernel_insert(struct fec *fec, int af, union ldpd_addr *nexthop,
-    ifindex_t ifindex, uint8_t priority, int connected, void *data)
+    ifindex_t ifindex, uint8_t route_type, unsigned short route_instance,
+    int connected, void *data)
 {
 	struct fec_node		*fn;
 	struct fec_nh		*fnh;
+	struct iface		*iface;
 
 	fn = (struct fec_node *)fec_find(&ft, fec);
 	if (fn == NULL)
@@ -329,17 +321,30 @@ lde_kernel_insert(struct fec *fec, int af, union ldpd_addr *nexthop,
 	if (data)
 		fn->data = data;
 
-	fnh = fec_nh_find(fn, af, nexthop, ifindex, priority);
-	if (fnh == NULL)
-		fnh = fec_nh_add(fn, af, nexthop, ifindex, priority);
-	fnh->flags |= F_FEC_NH_NEW;
+	fnh = fec_nh_find(fn, af, nexthop, ifindex, route_type, route_instance);
+	if (fnh == NULL) {
+		fnh = fec_nh_add(fn, af, nexthop, ifindex, route_type,
+		    route_instance);
+		/*
+		 * Ordered Control: if not a connected route and not a route
+		 * learned over an interface not running LDP and not a PW
+		 * then mark to wait until we receive labelmap msg before
+		 * installing in kernel and sending to peer
+		 */
+		iface = if_lookup(ldeconf, ifindex);
+		if (CHECK_FLAG(ldeconf->flags, F_LDPD_ORDERED_CONTROL) &&
+		    !connected && iface != NULL && fec->type != FEC_TYPE_PWID)
+			SET_FLAG(fnh->flags, F_FEC_NH_DEFER);
+	}
+
+	SET_FLAG(fnh->flags, F_FEC_NH_NEW);
 	if (connected)
-		fnh->flags |= F_FEC_NH_CONNECTED;
+		SET_FLAG(fnh->flags, F_FEC_NH_CONNECTED);
 }
 
 void
 lde_kernel_remove(struct fec *fec, int af, union ldpd_addr *nexthop,
-    ifindex_t ifindex, uint8_t priority)
+    ifindex_t ifindex, uint8_t route_type, unsigned short route_instance)
 {
 	struct fec_node		*fn;
 	struct fec_nh		*fnh;
@@ -348,7 +353,7 @@ lde_kernel_remove(struct fec *fec, int af, union ldpd_addr *nexthop,
 	if (fn == NULL)
 		/* route lost */
 		return;
-	fnh = fec_nh_find(fn, af, nexthop, ifindex, priority);
+	fnh = fec_nh_find(fn, af, nexthop, ifindex, route_type, route_instance);
 	if (fnh == NULL)
 		/* route lost */
 		return;
@@ -370,15 +375,30 @@ lde_kernel_update(struct fec *fec)
 	struct fec_nh		*fnh, *safe;
 	struct lde_nbr		*ln;
 	struct lde_map		*me;
+	struct iface		*iface;
 
 	fn = (struct fec_node *)fec_find(&ft, fec);
 	if (fn == NULL)
 		return;
 
 	LIST_FOREACH_SAFE(fnh, &fn->nexthops, entry, safe) {
-		if (fnh->flags & F_FEC_NH_NEW)
-			fnh->flags &= ~F_FEC_NH_NEW;
-		else {
+		if (CHECK_FLAG(fnh->flags, F_FEC_NH_NEW)) {
+			UNSET_FLAG(fnh->flags, F_FEC_NH_NEW);
+			/*
+			 * if LDP configured on interface or a static route
+			 * clear flag else treat fec as a connected route
+			 */
+			if (CHECK_FLAG(ldeconf->flags, F_LDPD_ENABLED)) {
+				iface = if_lookup(ldeconf,fnh->ifindex);
+				if (CHECK_FLAG(fnh->flags, F_FEC_NH_CONNECTED) ||
+				    iface ||
+				    fnh->route_type == ZEBRA_ROUTE_STATIC)
+					UNSET_FLAG(fnh->flags, F_FEC_NH_NO_LDP);
+				else
+					SET_FLAG(fnh->flags, F_FEC_NH_NO_LDP);
+			} else
+				SET_FLAG(fnh->flags, F_FEC_NH_NO_LDP);
+		} else {
 			lde_send_delete_klabel(fn, fnh);
 			fec_nh_del(fnh);
 		}
@@ -406,6 +426,10 @@ lde_kernel_update(struct fec *fec)
 				lde_send_labelmapping(ln, fn, 1);
 	}
 
+	/* if no label created yet then don't try to program labeled route */
+	if (fn->local_label == NO_LABEL)
+		return;
+
 	LIST_FOREACH(fnh, &fn->nexthops, entry) {
 		lde_send_change_klabel(fn, fnh);
 
@@ -427,13 +451,13 @@ lde_kernel_update(struct fec *fec)
 			me = (struct lde_map *)fec_find(&ln->recv_map, &fn->fec);
 			if (me)
 				/* FEC.5 */
-				lde_check_mapping(&me->map, ln);
+				lde_check_mapping(&me->map, ln, 0);
 		}
 	}
 }
 
 void
-lde_check_mapping(struct map *map, struct lde_nbr *ln)
+lde_check_mapping(struct map *map, struct lde_nbr *ln, int rcvd_label_mapping)
 {
 	struct fec		 fec;
 	struct fec_node		*fn;
@@ -441,6 +465,7 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln)
 	struct lde_req		*lre;
 	struct lde_map		*me;
 	struct l2vpn_pw		*pw;
+	bool			 send_map = false;
 
 	lde_map2fec(map, ln->id, &fec);
 
@@ -463,7 +488,7 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln)
 		    fec.u.ipv6.prefixlen) != FILTER_PERMIT)
 			return;
 		break;
-	default:
+	case FEC_TYPE_PWID:
 		break;
 	}
 
@@ -478,8 +503,12 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln)
 		lde_req_del(ln, lre, 1);
 
 	/* RFC 4447 control word and status tlv negotiation */
-	if (map->type == MAP_TYPE_PWID && l2vpn_pw_negotiate(ln, fn, map))
+	if (map->type == MAP_TYPE_PWID && l2vpn_pw_negotiate(ln, fn, map)) {
+		if (rcvd_label_mapping && CHECK_FLAG(map->flags, F_MAP_PW_STATUS))
+			fn->pw_remote_status = map->pw_status;
+
 		return;
+	}
 
 	/*
 	 * LMp.3 - LMp.8: loop detection - unnecessary for frame-mode
@@ -499,8 +528,7 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln)
 			 * the possibility of multipath.
 			 */
 			LIST_FOREACH(fnh, &fn->nexthops, entry) {
-				if (lde_address_find(ln, fnh->af,
-				    &fnh->nexthop) == NULL)
+				if (lde_address_find(ln, fnh->af, &fnh->nexthop) == NULL)
 					continue;
 
 				lde_send_delete_klabel(fn, fnh);
@@ -521,8 +549,18 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln)
 			if (!lde_address_find(ln, fnh->af, &fnh->nexthop))
 				continue;
 
+			/*
+			 * Ordered Control: labelmap msg received from
+			 * NH so clear flag and send labelmap msg to
+			 * peer
+			 */
+			if (CHECK_FLAG(ldeconf->flags, F_LDPD_ORDERED_CONTROL)) {
+				send_map = true;
+				UNSET_FLAG(fnh->flags, F_FEC_NH_DEFER);
+			}
 			fnh->remote_label = map->label;
-			lde_send_change_klabel(fn, fnh);
+			if (fn->local_label != NO_LABEL)
+				lde_send_change_klabel(fn, fnh);
 			break;
 		case FEC_TYPE_PWID:
 			pw = (struct l2vpn_pw *) fn->data;
@@ -530,10 +568,12 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln)
 				continue;
 
 			pw->remote_group = map->fec.pwid.group_id;
-			if (map->flags & F_MAP_PW_IFMTU)
+			if (CHECK_FLAG(map->flags, F_MAP_PW_IFMTU))
 				pw->remote_mtu = map->fec.pwid.ifmtu;
-			if (map->flags & F_MAP_PW_STATUS)
+			if (rcvd_label_mapping && CHECK_FLAG(map->flags, F_MAP_PW_STATUS)) {
 				pw->remote_status = map->pw_status;
+				fn->pw_remote_status = map->pw_status;
+			}
 			else
 				pw->remote_status = PW_FORWARDING;
 			fnh->remote_label = map->label;
@@ -544,6 +584,10 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln)
 			break;
 		}
 	}
+
+	/* Update RLFA clients. */
+	lde_rlfa_update_clients(&fec, ln, map->label);
+
 	/* LMp.13 & LMp.16: Record the mapping from this peer */
 	if (me == NULL)
 		me = lde_map_add(ln, fn, 0);
@@ -554,6 +598,15 @@ lde_check_mapping(struct map *map, struct lde_nbr *ln)
 	 * loop detection. LMp.28 - LMp.30 are unnecessary because we are
 	 * merging capable.
 	 */
+
+	/*
+	 * Ordered Control: just received a labelmap for this fec from NH so
+	 * need to send labelmap to all peers
+	 * LMp.20 - LMp21 Execute procedure to send Label Mapping
+	 */
+	if (send_map && fn->local_label != NO_LABEL)
+		RB_FOREACH(ln, nbr_tree, &lde_nbrs)
+			lde_send_labelmapping(ln, fn, 1);
 }
 
 void
@@ -594,7 +647,7 @@ lde_check_request(struct map *map, struct lde_nbr *ln)
 			lde_send_notification(ln, S_LOOP_DETECTED, map->msg_id,
 			    htons(MSG_TYPE_LABELREQUEST));
 			return;
-		default:
+		case FEC_TYPE_PWID:
 			break;
 		}
 	}
@@ -666,7 +719,7 @@ lde_check_release(struct map *map, struct lde_nbr *ln)
 	/* wildcard label release */
 	if (map->type == MAP_TYPE_WILDCARD ||
 	    map->type == MAP_TYPE_TYPED_WCARD ||
-	    (map->type == MAP_TYPE_PWID && !(map->flags & F_MAP_PW_ID))) {
+	    (map->type == MAP_TYPE_PWID && !CHECK_FLAG(map->flags, F_MAP_PW_ID))) {
 		lde_check_release_wcard(map, ln);
 		return;
 	}
@@ -753,11 +806,12 @@ lde_check_withdraw(struct map *map, struct lde_nbr *ln)
 	struct fec_nh		*fnh;
 	struct lde_map		*me;
 	struct l2vpn_pw		*pw;
+	struct lde_nbr		*lnbr;
 
 	/* wildcard label withdraw */
 	if (map->type == MAP_TYPE_WILDCARD ||
 	    map->type == MAP_TYPE_TYPED_WCARD ||
-	    (map->type == MAP_TYPE_PWID && !(map->flags & F_MAP_PW_ID))) {
+	    (map->type == MAP_TYPE_PWID && !CHECK_FLAG(map->flags, F_MAP_PW_ID))) {
 		lde_check_withdraw_wcard(map, ln);
 		return;
 	}
@@ -791,6 +845,9 @@ lde_check_withdraw(struct map *map, struct lde_nbr *ln)
 		fnh->remote_label = NO_LABEL;
 	}
 
+	/* Update RLFA clients. */
+	lde_rlfa_update_clients(&fec, ln, MPLS_INVALID_LABEL);
+
 	/* LWd.2: send label release */
 	lde_send_labelrelease(ln, fn, NULL, map->label);
 
@@ -799,6 +856,30 @@ lde_check_withdraw(struct map *map, struct lde_nbr *ln)
 	if (me && (map->label == NO_LABEL || map->label == me->map.label))
 		/* LWd.4: remove record of previously received lbl mapping */
 		lde_map_del(ln, me, 0);
+	else
+		/* LWd.13 done */
+		return;
+
+	/* Ordered Control: additional withdraw steps */
+	if (CHECK_FLAG(ldeconf->flags, F_LDPD_ORDERED_CONTROL)) {
+		/* LWd.8: for each neighbor other that src of withdraw msg */
+		RB_FOREACH(lnbr, nbr_tree, &lde_nbrs) {
+			if (ln->peerid == lnbr->peerid)
+				continue;
+
+			/* LWd.9: check if previously sent a label mapping */
+			me = (struct lde_map *)fec_find(&lnbr->sent_map, &fn->fec);
+
+			/*
+			 * LWd.10: does label sent to peer "map" to withdraw
+			 * label
+			 */
+			if (me && lde_nbr_is_nexthop(fn, lnbr))
+				/* LWd.11: send label withdraw */
+				lde_send_labelwithdraw(lnbr, fn, NULL, NULL);
+		}
+	}
+
 }
 
 void
@@ -809,6 +890,7 @@ lde_check_withdraw_wcard(struct map *map, struct lde_nbr *ln)
 	struct fec_nh	*fnh;
 	struct lde_map	*me;
 	struct l2vpn_pw	*pw;
+	struct lde_nbr  *lnbr;
 
 	/* LWd.2: send label release */
 	lde_send_labelrelease(ln, NULL, map, map->label);
@@ -825,8 +907,7 @@ lde_check_withdraw_wcard(struct map *map, struct lde_nbr *ln)
 			switch (f->type) {
 			case FEC_TYPE_IPV4:
 			case FEC_TYPE_IPV6:
-				if (!lde_address_find(ln, fnh->af,
-				    &fnh->nexthop))
+				if (!lde_address_find(ln, fnh->af, &fnh->nexthop))
 					continue;
 				break;
 			case FEC_TYPE_PWID:
@@ -839,22 +920,50 @@ lde_check_withdraw_wcard(struct map *map, struct lde_nbr *ln)
 			default:
 				break;
 			}
-			if (map->label != NO_LABEL && map->label !=
-			    fnh->remote_label)
+			if (map->label != NO_LABEL && map->label != fnh->remote_label)
 				continue;
 
 			lde_send_delete_klabel(fn, fnh);
 			fnh->remote_label = NO_LABEL;
 		}
 
+		/* Update RLFA clients. */
+		lde_rlfa_update_clients(f, ln, MPLS_INVALID_LABEL);
+
 		/* LWd.3: check previously received label mapping */
-		if (me && (map->label == NO_LABEL ||
-		    map->label == me->map.label))
+		if (me && (map->label == NO_LABEL || map->label == me->map.label))
 			/*
 			 * LWd.4: remove record of previously received
 			 * label mapping
 			 */
 			lde_map_del(ln, me, 0);
+		else
+			/* LWd.13 done */
+			continue;
+
+		/* Ordered Control: additional withdraw steps */
+		if (CHECK_FLAG(ldeconf->flags, F_LDPD_ORDERED_CONTROL)) {
+			/*
+			 * LWd.8: for each neighbor other that src of
+			 *  withdraw msg
+			 */
+			RB_FOREACH(lnbr, nbr_tree, &lde_nbrs) {
+				if (ln->peerid == lnbr->peerid)
+					continue;
+
+				/* LWd.9: check if previously sent a label
+				 * mapping
+				 */
+				me = (struct lde_map *)fec_find(&lnbr->sent_map, &fn->fec);
+				/*
+				 * LWd.10: does label sent to peer "map" to
+				 *  withdraw label
+				 */
+				if (me && lde_nbr_is_nexthop(fn, lnbr))
+					/* LWd.11: send label withdraw */
+					lde_send_labelwithdraw(lnbr, fn, NULL, NULL);
+			}
+		}
 	}
 }
 
@@ -904,8 +1013,7 @@ lde_wildcard_apply(struct map *wcard, struct fec *fec, struct lde_map *me)
 /* gabage collector timer: timer to remove dead entries from the LIB */
 
 /* ARGSUSED */
-int
-lde_gc_timer(struct thread *thread)
+void lde_gc_timer(struct event *thread)
 {
 	struct fec	*fec, *safe;
 	struct fec_node	*fn;
@@ -919,6 +1027,9 @@ lde_gc_timer(struct thread *thread)
 		    !RB_EMPTY(lde_map_head, &fn->upstream))
 			continue;
 
+		if (fn->local_label != NO_LABEL)
+			lde_free_label(fn->local_label);
+
 		fec_remove(&ft, &fn->fec);
 		free(fn);
 		count++;
@@ -928,21 +1039,17 @@ lde_gc_timer(struct thread *thread)
 		log_debug("%s: %u entries removed", __func__, count);
 
 	lde_gc_start_timer();
-
-	return (0);
 }
 
 void
 lde_gc_start_timer(void)
 {
-	THREAD_TIMER_OFF(gc_timer);
-	gc_timer = NULL;
-	thread_add_timer(master, lde_gc_timer, NULL, LDE_GC_INTERVAL,
-			 &gc_timer);
+	EVENT_OFF(gc_timer);
+	event_add_timer(master, lde_gc_timer, NULL, LDE_GC_INTERVAL, &gc_timer);
 }
 
 void
 lde_gc_stop_timer(void)
 {
-	THREAD_TIMER_OFF(gc_timer);
+	EVENT_OFF(gc_timer);
 }

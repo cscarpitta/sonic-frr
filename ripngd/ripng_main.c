@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * RIPngd main routine.
  * Copyright (C) 1998, 1999 Kunihiro Ishiguro
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
@@ -27,8 +12,7 @@
 #include "vty.h"
 #include "command.h"
 #include "memory.h"
-#include "memory_vty.h"
-#include "thread.h"
+#include "frrevent.h"
 #include "log.h"
 #include "prefix.h"
 #include "if.h"
@@ -37,17 +21,19 @@
 #include "vrf.h"
 #include "if_rmap.h"
 #include "libfrr.h"
+#include "routemap.h"
+#include "mgmt_be_client.h"
 
 #include "ripngd/ripngd.h"
+#include "ripngd/ripng_nb.h"
 
 /* RIPngd options. */
-#if CONFDATE > 20190521
-	CPP_NOTICE("-r / --retain has reached deprecation EOL, remove")
-#endif
-struct option longopts[] = {{"retain", no_argument, NULL, 'r'}, {0}};
+struct option longopts[] = {{0}};
 
 /* ripngd privileges */
 zebra_capabilities_t _caps_p[] = {ZCAP_NET_RAW, ZCAP_BIND, ZCAP_SYS_ADMIN};
+
+uint32_t zebra_ecmp_count = MULTIPATH_NUM;
 
 struct zebra_privs_t ripngd_privs = {
 #if defined(FRR_USER)
@@ -65,7 +51,9 @@ struct zebra_privs_t ripngd_privs = {
 
 
 /* Master of threads. */
-struct thread_master *master;
+struct event_loop *master;
+
+struct mgmt_be_client *mgmt_be_client;
 
 static struct frr_daemon_info ripngd_di;
 
@@ -81,11 +69,27 @@ static void sighup(void)
 /* SIGINT handler. */
 static void sigint(void)
 {
+	struct vrf *vrf;
+
 	zlog_notice("Terminating on signal");
+
+	nb_oper_cancel_all_walks();
+	mgmt_be_client_destroy(mgmt_be_client);
+	mgmt_be_client = NULL;
+
+	RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
+		if (!vrf->info)
+			continue;
+
+		ripng_clean(vrf->info);
+	}
 
 	ripng_vrf_terminate();
 	if_rmap_terminate();
 	ripng_zebra_stop();
+
+	route_map_finish();
+
 	frr_fini();
 	exit(0);
 }
@@ -96,7 +100,7 @@ static void sigusr1(void)
 	zlog_rotate();
 }
 
-struct quagga_signal_t ripng_signals[] = {
+struct frr_signal_t ripng_signals[] = {
 	{
 		.signal = SIGHUP,
 		.handler = &sighup,
@@ -115,27 +119,34 @@ struct quagga_signal_t ripng_signals[] = {
 	},
 };
 
-static const struct frr_yang_module_info *ripngd_yang_modules[] = {
+static const struct frr_yang_module_info *const ripngd_yang_modules[] = {
+	&frr_backend_info,
+	&frr_filter_info,
 	&frr_interface_info,
 	&frr_ripngd_info,
+	&frr_route_map_info,
+	&frr_vrf_info,
 };
 
-FRR_DAEMON_INFO(ripngd, RIPNG, .vty_port = RIPNG_VTY_PORT,
+/* clang-format off */
+FRR_DAEMON_INFO(ripngd, RIPNG,
+	.vty_port = RIPNG_VTY_PORT,
+	.proghelp = "Implementation of the RIPng routing protocol.",
 
-		.proghelp = "Implementation of the RIPng routing protocol.",
+	.signals = ripng_signals,
+	.n_signals = array_size(ripng_signals),
 
-		.signals = ripng_signals,
-		.n_signals = array_size(ripng_signals),
+	.privs = &ripngd_privs,
 
-		.privs = &ripngd_privs,
+	.yang_modules = ripngd_yang_modules,
+	.n_yang_modules = array_size(ripngd_yang_modules),
 
-		.yang_modules = ripngd_yang_modules,
-		.n_yang_modules = array_size(ripngd_yang_modules), )
+	/* mgmtd will load the per-daemon config file now */
+	.flags = FRR_NO_SPLIT_CONFIG,
+);
+/* clang-format on */
 
-#if CONFDATE > 20190521
-CPP_NOTICE("-r / --retain has reached deprecation EOL, remove")
-#endif
-#define DEPRECATED_OPTIONS "r"
+#define DEPRECATED_OPTIONS ""
 
 /* RIPngd main routine. */
 int main(int argc, char **argv)
@@ -164,7 +175,6 @@ int main(int argc, char **argv)
 			break;
 		default:
 			frr_help_exit(1);
-			break;
 		}
 	}
 
@@ -175,7 +185,9 @@ int main(int argc, char **argv)
 
 	/* RIPngd inits. */
 	ripng_init();
-	ripng_cli_init();
+
+	mgmt_be_client = mgmt_be_client_create("ripngd", NULL, 0, master);
+
 	zebra_init(master);
 
 	frr_config_fork();

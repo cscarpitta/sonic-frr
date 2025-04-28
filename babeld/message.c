@@ -1,23 +1,6 @@
+// SPDX-License-Identifier: MIT
 /*
 Copyright (c) 2007, 2008 by Juliusz Chroboczek
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
 */
 
 #include <zebra.h>
@@ -64,6 +47,13 @@ static const unsigned char tlv_min_length[MESSAGE_MAX + 1] =
     [ MESSAGE_REQUEST    ] =  2,
     [ MESSAGE_MH_REQUEST ] = 14,
 };
+
+/* Checks whether an AE exists or must be silently ignored */
+static bool
+known_ae(int ae)
+{
+    return ae <= 4;
+}
 
 /* Parse a network prefix, encoded in the somewhat baroque compressed
    representation used by Babel.  Return the number of bytes parsed. */
@@ -127,9 +117,8 @@ network_prefix(int ae, int plen, unsigned int omitted,
     return ret;
 }
 
-static void
-parse_update_subtlv(const unsigned char *a, int alen,
-                    unsigned char *channels)
+static bool parse_update_subtlv(const unsigned char *a, int alen,
+				unsigned char *channels)
 {
     int type, len, i = 0;
 
@@ -140,39 +129,52 @@ parse_update_subtlv(const unsigned char *a, int alen,
             continue;
         }
 
-        if(i + 1 > alen) {
+        if(i + 1 >= alen) {
             flog_err(EC_BABEL_PACKET, "Received truncated attributes.");
-            return;
-        }
+	    return false;
+	}
         len = a[i + 1];
-        if(i + len > alen) {
+        if(i + len + 2 > alen) {
             flog_err(EC_BABEL_PACKET, "Received truncated attributes.");
-            return;
-        }
+	    return false;
+	}
 
-        if(type == SUBTLV_PADN) {
-            /* Nothing. */
-        } else if(type == SUBTLV_DIVERSITY) {
-            if(len > DIVERSITY_HOPS) {
-                flog_err(EC_BABEL_PACKET,
-			  "Received overlong channel information (%d > %d).n",
-                          len, DIVERSITY_HOPS);
-                len = DIVERSITY_HOPS;
-            }
-            if(memchr(a + i + 2, 0, len) != NULL) {
-                /* 0 is reserved. */
-                flog_err(EC_BABEL_PACKET, "Channel information contains 0!");
-                return;
-            }
-            memset(channels, 0, DIVERSITY_HOPS);
-            memcpy(channels, a + i + 2, len);
-        } else {
-            debugf(BABEL_DEBUG_COMMON,
-                   "Received unknown route attribute %d.", type);
-        }
+	if (CHECK_FLAG(type, SUBTLV_MANDATORY)) {
+		/*
+		 * RFC 8966 - 4.4
+		 * If the mandatory bit is set, then the whole enclosing
+		 * TLV MUST be silently ignored (except for updating the
+		 * parser state by a Router-Id, Next Hop, or Update TLV,
+		 * as described in the next section).
+		 */
+		debugf(BABEL_DEBUG_COMMON,
+		       "Received Mandatory bit set but this FRR version is not prepared to handle it at this point");
+		return true;
+	} else if (type == SUBTLV_PADN) {
+		/* Nothing. */
+	} else if (type == SUBTLV_DIVERSITY) {
+		if (len > DIVERSITY_HOPS) {
+			flog_err(
+				EC_BABEL_PACKET,
+				"Received overlong channel information (%d > %d).n",
+				len, DIVERSITY_HOPS);
+			len = DIVERSITY_HOPS;
+		}
+		if (memchr(a + i + 2, 0, len) != NULL) {
+			/* 0 is reserved. */
+			flog_err(EC_BABEL_PACKET, "Channel information contains 0!");
+			return false;
+		}
+		memset(channels, 0, DIVERSITY_HOPS);
+		memcpy(channels, a + i + 2, len);
+	} else {
+		debugf(BABEL_DEBUG_COMMON,
+		       "Received unknown route attribute %d.", type);
+	}
 
-        i += len + 2;
+	i += len + 2;
     }
+    return false;
 }
 
 static int
@@ -182,40 +184,52 @@ parse_hello_subtlv(const unsigned char *a, int alen,
     int type, len, i = 0, ret = 0;
 
     while(i < alen) {
-        type = a[0];
+        type = a[i];
         if(type == SUBTLV_PAD1) {
             i++;
             continue;
         }
 
-        if(i + 1 > alen) {
+        if(i + 1 >= alen) {
             flog_err(EC_BABEL_PACKET,
 		      "Received truncated sub-TLV on Hello message.");
             return -1;
         }
         len = a[i + 1];
-        if(i + len > alen) {
+        if(i + len + 2 > alen) {
             flog_err(EC_BABEL_PACKET,
 		      "Received truncated sub-TLV on Hello message.");
             return -1;
         }
 
-        if(type == SUBTLV_PADN) {
-            /* Nothing to do. */
-        } else if(type == SUBTLV_TIMESTAMP) {
-            if(len >= 4) {
-                DO_NTOHL(*hello_send_us, a + i + 2);
-                ret = 1;
-            } else {
-                flog_err(EC_BABEL_PACKET,
-			  "Received incorrect RTT sub-TLV on Hello message.");
-            }
-        } else {
-            debugf(BABEL_DEBUG_COMMON,
-                   "Received unknown Hello sub-TLV type %d.", type);
-        }
+	if (CHECK_FLAG(type, SUBTLV_MANDATORY)) {
+		/*
+		 * RFC 8966 4.4
+		 * If the mandatory bit is set, then the whole enclosing
+		 * TLV MUST be silently ignored (except for updating the
+		 * parser state by a Router-Id, Next Hop, or Update TLV, as
+		 * described in the next section).
+		 */
+		debugf(BABEL_DEBUG_COMMON,
+		       "Received subtlv with Mandatory bit, this version of FRR is not prepared to handle this currently");
+		return -2;
+	} else if (type == SUBTLV_PADN) {
+		/* Nothing to do. */
+	} else if (type == SUBTLV_TIMESTAMP) {
+		if (len >= 4) {
+			DO_NTOHL(*hello_send_us, a + i + 2);
+			ret = 1;
+		} else {
+			flog_err(
+				EC_BABEL_PACKET,
+				"Received incorrect RTT sub-TLV on Hello message.");
+		}
+	} else {
+		debugf(BABEL_DEBUG_COMMON,
+		       "Received unknown Hello sub-TLV type %d.", type);
+	}
 
-        i += len + 2;
+	i += len + 2;
     }
     return ret;
 }
@@ -228,19 +242,19 @@ parse_ihu_subtlv(const unsigned char *a, int alen,
     int type, len, i = 0, ret = 0;
 
     while(i < alen) {
-        type = a[0];
+        type = a[i];
         if(type == SUBTLV_PAD1) {
             i++;
             continue;
         }
 
-        if(i + 1 > alen) {
+        if(i + 1 >= alen) {
             flog_err(EC_BABEL_PACKET,
 		      "Received truncated sub-TLV on IHU message.");
             return -1;
         }
         len = a[i + 1];
-        if(i + len > alen) {
+        if(i + len + 2 > alen) {
             flog_err(EC_BABEL_PACKET,
 		      "Received truncated sub-TLV on IHU message.");
             return -1;
@@ -269,6 +283,62 @@ parse_ihu_subtlv(const unsigned char *a, int alen,
 }
 
 static int
+parse_request_subtlv(int ae, const unsigned char *a, int alen,
+                     unsigned char *src_prefix, unsigned char *src_plen)
+{
+    int type, len, i = 0;
+    int have_src_prefix = 0;
+
+    while(i < alen) {
+        type = a[0];
+        if(type == SUBTLV_PAD1) {
+            i++;
+            continue;
+        }
+
+        if(i + 2 > alen)
+            goto fail;
+
+        len = a[i + 1];
+        if(i + 2 + len > alen)
+            goto fail;
+
+        if(type == SUBTLV_PADN) {
+            /* Nothing to do. */
+        } else if(type == SUBTLV_SOURCE_PREFIX) {
+            int rc;
+            if(len < 1)
+                goto fail;
+            if(a[i + 2] == 0)
+                goto fail;
+            if(have_src_prefix != 0)
+                goto fail;
+            rc = network_prefix(ae, a[i + 2], 0, a + i + 3, NULL,
+                                len - 1, src_prefix);
+            if(rc < 0)
+                goto fail;
+            if(ae==1)
+                *src_plen = a[i + 2] + 96;
+            else
+                *src_plen = a[i + 2];
+            have_src_prefix = 1;
+        } else {
+            debugf(BABEL_DEBUG_COMMON,"Received unknown%s Route Request sub-TLV %d.",
+                   (CHECK_FLAG(type, 0x80) != 0) ? " mandatory" : "", type);
+            if(CHECK_FLAG(type, 0x80) != 0)
+                return -1;
+        }
+
+        i += len + 2;
+    }
+    return 1;
+
+ fail:
+    flog_err(EC_BABEL_PACKET, "Received truncated sub-TLV on Route Request.");
+    return -1;
+}
+
+static int
 network_address(int ae, const unsigned char *a, unsigned int len,
                 unsigned char *a_r)
 {
@@ -286,15 +356,20 @@ channels_len(unsigned char *channels)
    followed by a sequence of TLVs. TLVs of known types are also checked to meet
    minimum length constraints defined for each. Return 0 for no errors. */
 static int
-babel_packet_examin(const unsigned char *packet, int packetlen)
+babel_packet_examin(const unsigned char *packet, int packetlen, int *blength)
 {
-    unsigned i = 0, bodylen;
+    int i = 0, bodylen;
     const unsigned char *message;
     unsigned char type, len;
 
     if(packetlen < 4 || packet[0] != 42 || packet[1] != 2)
         return 1;
     DO_NTOHS(bodylen, packet + 2);
+    if(bodylen + 4 > packetlen) {
+        debugf(BABEL_DEBUG_COMMON, "Received truncated packet (%d + 4 > %d).",
+                 bodylen, packetlen);
+        return 1;
+    }
     while (i < bodylen){
         message = packet + 4 + i;
         type = message[0];
@@ -302,12 +377,12 @@ babel_packet_examin(const unsigned char *packet, int packetlen)
             i++;
             continue;
         }
-        if(i + 1 > bodylen) {
+        if(i + 2 > bodylen) {
             debugf(BABEL_DEBUG_COMMON,"Received truncated message.");
             return 1;
         }
         len = message[1];
-        if(i + len > bodylen) {
+        if(i + len + 2 > bodylen) {
             debugf(BABEL_DEBUG_COMMON,"Received truncated message.");
             return 1;
         }
@@ -318,6 +393,8 @@ babel_packet_examin(const unsigned char *packet, int packetlen)
         }
         i += len + 2;
     }
+
+    *blength = bodylen;
     return 0;
 }
 
@@ -339,7 +416,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
     unsigned int hello_send_us = 0, hello_rtt_receive_time = 0;
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
 
-    if(babel_ifp->flags & BABEL_IF_TIMESTAMPS) {
+    if (CHECK_FLAG(babel_ifp->flags, BABEL_IF_TIMESTAMPS)) {
         /* We want to track exactly when we received this packet. */
         gettime(&babel_now);
     }
@@ -351,7 +428,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
         return;
     }
 
-    if (babel_packet_examin (packet, packetlen)) {
+    if (babel_packet_examin (packet, packetlen, &bodylen)) {
         flog_err(EC_BABEL_PACKET,
 		  "Received malformed packet on %s from %s.",
                   ifp->name, format_address(from));
@@ -362,14 +439,6 @@ parse_packet(const unsigned char *from, struct interface *ifp,
     if(neigh == NULL) {
         flog_err(EC_BABEL_PACKET, "Couldn't allocate neighbour.");
         return;
-    }
-
-    DO_NTOHS(bodylen, packet + 2);
-
-    if(bodylen + 4 > packetlen) {
-        flog_err(EC_BABEL_PACKET, "Received truncated packet (%d + 4 > %d).",
-                 bodylen, packetlen);
-        bodylen = packetlen - 4;
     }
 
     i = 0;
@@ -399,27 +468,56 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                    format_address(from), ifp->name);
             /* Nothing right now */
         } else if(type == MESSAGE_HELLO) {
-            unsigned short seqno, interval;
-            int changed;
-            unsigned int timestamp = 0;
-            DO_NTOHS(seqno, message + 4);
-            DO_NTOHS(interval, message + 6);
-            debugf(BABEL_DEBUG_COMMON,"Received hello %d (%d) from %s on %s.",
-                   seqno, interval,
-                   format_address(from), ifp->name);
-            changed = update_neighbour(neigh, seqno, interval);
-            update_neighbour_metric(neigh, changed);
-            if(interval > 0)
-                /* Multiply by 3/2 to allow hellos to expire. */
-                schedule_neighbours_check(interval * 15, 0);
-            /* Sub-TLV handling. */
-            if(len > 8) {
-                if(parse_hello_subtlv(message + 8, len - 6, &timestamp) > 0) {
-                    neigh->hello_send_us = timestamp;
-                    neigh->hello_rtt_receive_time = babel_now;
-                    have_hello_rtt = 1;
-                }
-            }
+		unsigned short seqno, interval, flags;
+		int changed;
+		unsigned int timestamp = 0;
+
+#define BABEL_UNICAST_HELLO 0x8000
+		DO_NTOHS(flags, message + 2);
+
+		/*
+		 * RFC 8966 Appendix F
+		 * TL;DR -> Please ignore Unicast hellos until FRR's
+		 * BABEL is brought up to date
+		 */
+		if (CHECK_FLAG(flags, BABEL_UNICAST_HELLO)) {
+			debugf(BABEL_DEBUG_COMMON,
+			       "Received Unicast Hello from %s on %s that FRR is not prepared to understand yet",
+			       format_address(from), ifp->name);
+			goto done;
+		}
+
+		DO_NTOHS(seqno, message + 4);
+		DO_NTOHS(interval, message + 6);
+		debugf(BABEL_DEBUG_COMMON,
+		       "Received hello %d (%d) from %s on %s.", seqno, interval,
+		       format_address(from), ifp->name);
+
+		/*
+		 * RFC 8966 Appendix F
+		 * TL;DR -> Please ignore any Hello packets with the interval
+		 * field set to 0
+		 */
+		if (interval == 0) {
+			debugf(BABEL_DEBUG_COMMON,
+			       "Received hello from %s on %s should be ignored as that this version of FRR does not know how to properly handle interval == 0",
+			       format_address(from), ifp->name);
+			goto done;
+		}
+
+		changed = update_neighbour(neigh, seqno, interval);
+		update_neighbour_metric(neigh, changed);
+		if (interval > 0)
+			/* Multiply by 3/2 to allow hellos to expire. */
+			schedule_neighbours_check(interval * 15, 0);
+		/* Sub-TLV handling. */
+		if (len > 8) {
+			if (parse_hello_subtlv(message + 8, len - 6, &timestamp) > 0) {
+				neigh->hello_send_us = timestamp;
+				neigh->hello_rtt_receive_time = babel_now;
+				have_hello_rtt = 1;
+			}
+		}
         } else if(type == MESSAGE_IHU) {
             unsigned short txcost, interval;
             unsigned char address[16];
@@ -454,9 +552,8 @@ parse_packet(const unsigned char *from, struct interface *ifp,
         } else if(type == MESSAGE_NH) {
             unsigned char nh[16];
             int rc;
-            rc = network_address(message[2], message + 4, len - 2,
-                                 nh);
-            if(rc < 0) {
+            rc = network_address(message[2], message + 4, len - 2, nh);
+            if(rc <= 0) {
                 have_v4_nh = 0;
                 have_v6_nh = 0;
                 goto fail;
@@ -477,6 +574,8 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             unsigned char channels[DIVERSITY_HOPS];
             unsigned short interval, seqno, metric;
             int rc, parsed_len;
+            bool ignore_update = false;
+
             DO_NTOHS(interval, message + 6);
             DO_NTOHS(seqno, message + 8);
             DO_NTOHS(metric, message + 10);
@@ -489,7 +588,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             else
                 rc = -1;
             if(rc < 0) {
-                if(message[3] & 0x80)
+                if(CHECK_FLAG(message[3], 0x80))
                     have_v4_prefix = have_v6_prefix = 0;
                 goto fail;
             }
@@ -497,7 +596,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
 
             plen = message[4] + (message[2] == 1 ? 96 : 0);
 
-            if(message[3] & 0x80) {
+            if(CHECK_FLAG(message[3], 0x80)) {
                 if(message[2] == 1) {
                     memcpy(v4_prefix, prefix, 16);
                     have_v4_prefix = 1;
@@ -506,7 +605,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                     have_v6_prefix = 1;
                 }
             }
-            if(message[3] & 0x40) {
+            if(CHECK_FLAG(message[3], 0x40)) {
                 if(message[2] == 1) {
                     memset(router_id, 0, 4);
                     memcpy(router_id + 4, prefix + 12, 4);
@@ -521,8 +620,8 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                 goto fail;
             }
             debugf(BABEL_DEBUG_COMMON,"Received update%s%s for %s from %s on %s.",
-                   (message[3] & 0x80) ? "/prefix" : "",
-                   (message[3] & 0x40) ? "/id" : "",
+                   ((CHECK_FLAG(message[3], 0x80)) ? "/prefix" : ""),
+                   ((CHECK_FLAG(message[3], 0x40)) ? "/id" : ""),
                    format_prefix(prefix, plen),
                    format_address(from), ifp->name);
 
@@ -549,7 +648,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                     goto done;
             }
 
-            if((babel_get_if_nfo(ifp)->flags & BABEL_IF_FARAWAY)) {
+            if(CHECK_FLAG(babel_get_if_nfo(ifp)->flags, BABEL_IF_FARAWAY)) {
                 channels[0] = 0;
             } else {
                 /* This will be overwritten by parse_update_subtlv below. */
@@ -563,16 +662,23 @@ parse_packet(const unsigned char *from, struct interface *ifp,
                 }
 
                 if(parsed_len < len)
-                    parse_update_subtlv(message + 2 + parsed_len,
-                                        len - parsed_len, channels);
-            }
+					ignore_update =
+						parse_update_subtlv(message + 2 + parsed_len,
+						len - parsed_len, channels);
+	    }
 
-            update_route(router_id, prefix, plen, seqno, metric, interval,
-                         neigh, nh,
-                         channels, channels_len(channels));
-        } else if(type == MESSAGE_REQUEST) {
-            unsigned char prefix[16], plen;
-            int rc;
+	    if (!ignore_update)
+		    update_route(router_id, prefix, plen, seqno, metric,
+				 interval, neigh, nh, channels, channels_len(channels));
+	} else if(type == MESSAGE_REQUEST) {
+            unsigned char prefix[16], src_prefix[16], plen, src_plen;
+            int rc, is_ss;
+            if(len < 2) goto fail;
+            if(!known_ae(message[2])) {
+                debugf(BABEL_DEBUG_COMMON,"Received request with unknown AE %d. Ignoring.",
+                       message[2]);
+                goto done;
+            }
             rc = network_prefix(message[2], message[3], 0,
                                 message + 4, NULL, len - 2, prefix);
             if(rc < 0) goto fail;
@@ -580,8 +686,26 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             debugf(BABEL_DEBUG_COMMON,"Received request for %s from %s on %s.",
                    message[2] == 0 ? "any" : format_prefix(prefix, plen),
                    format_address(from), ifp->name);
+            if(message[2] == 1) {
+                v4tov6(src_prefix, zeroes);
+                src_plen = 96;
+            } else {
+                memcpy(src_prefix, zeroes, 16);
+                src_plen = 0;
+            }
+            rc = parse_request_subtlv(message[2], message + 4 + rc,
+                                      len - 2 - rc, src_prefix, &src_plen);
+            if(rc < 0)
+                goto done;
+            is_ss = !is_default(src_prefix, src_plen);
             if(message[2] == 0) {
                 struct babel_interface *neigh_ifp =babel_get_if_nfo(neigh->ifp);
+                if(is_ss) {
+                    /* Wildcard requests don't carry a source prefix. */
+                    flog_err(EC_BABEL_PACKET,
+			      "Received source-specific wildcard request.");
+                    goto done;
+                }
                 /* If a neighbour is requesting a full route dump from us,
                    we might as well send it an IHU. */
                 send_ihu(neigh, NULL);
@@ -603,15 +727,14 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             DO_NTOHS(seqno, message + 4);
             rc = network_prefix(message[2], message[3], 0,
                                 message + 16, NULL, len - 14, prefix);
-            if(rc < 0) goto fail;
+            if(rc <= 0) goto fail;
             plen = message[3] + (message[2] == 1 ? 96 : 0);
             debugf(BABEL_DEBUG_COMMON,"Received request (%d) for %s from %s on %s (%s, %d).",
                    message[6],
                    format_prefix(prefix, plen),
                    format_address(from), ifp->name,
                    format_eui64(message + 8), seqno);
-            handle_request(neigh, prefix, plen, message[6],
-                           seqno, message + 8);
+            handle_request(neigh, prefix, plen, message[6], seqno, message + 8);
         } else {
             debugf(BABEL_DEBUG_COMMON,"Received unknown packet type %d from %s on %s.",
                    type, format_address(from), ifp->name);
@@ -643,7 +766,7 @@ parse_packet(const unsigned char *from, struct interface *ifp,
             return;
 
         rtt = MAX(0, local_waiting_us - remote_waiting_us);
-        debugf(BABEL_DEBUG_COMMON, "RTT to %s on %s sample result: %d us.\n",
+        debugf(BABEL_DEBUG_COMMON, "RTT to %s on %s sample result: %d us.",
                format_address(from), ifp->name, rtt);
 
         old_rttcost = neighbour_rttcost(neigh);
@@ -693,11 +816,10 @@ check_bucket(struct interface *ifp)
     }
 }
 
-static int
-fill_rtt_message(struct interface *ifp)
+static int fill_rtt_message(struct interface *ifp)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
-    if((babel_ifp->flags & BABEL_IF_TIMESTAMPS) &&
+    if(CHECK_FLAG(babel_ifp->flags, BABEL_IF_TIMESTAMPS) &&
        (babel_ifp->buffered_hello >= 0)) {
         if(babel_ifp->sendbuf[babel_ifp->buffered_hello + 8] == SUBTLV_PADN &&
            babel_ifp->sendbuf[babel_ifp->buffered_hello + 9] == 4) {
@@ -710,16 +832,14 @@ fill_rtt_message(struct interface *ifp)
             DO_HTONL(babel_ifp->sendbuf + babel_ifp->buffered_hello + 10, time);
             return 1;
         } else {
-            flog_err(EC_BABEL_PACKET, "No space left for timestamp sub-TLV "
-                     "(this shouldn't happen)");
+            flog_err(EC_BABEL_PACKET, "No space left for timestamp sub-TLV (this shouldn't happen)");
             return -1;
         }
     }
     return 0;
 }
 
-void
-flushbuf(struct interface *ifp)
+void flushbuf(struct interface *ifp)
 {
     int rc;
     struct sockaddr_in6 sin6;
@@ -747,10 +867,9 @@ flushbuf(struct interface *ifp)
             if(rc < 0)
                 flog_err(EC_BABEL_PACKET, "send: %s", safe_strerror(errno));
         } else {
-            flog_err(EC_BABEL_PACKET,
-		      "Warning: bucket full, dropping packet to %s.",
-                      ifp->name);
-        }
+		flog_err(EC_BABEL_PACKET, "Bucket full, dropping packet to %s.",
+			 ifp->name);
+	}
     }
     VALGRIND_MAKE_MEM_UNDEFINED(babel_ifp->sendbuf, babel_ifp->bufsize);
     babel_ifp->buffered = 0;
@@ -762,8 +881,7 @@ flushbuf(struct interface *ifp)
     babel_ifp->flush_timeout.tv_usec = 0;
 }
 
-static void
-schedule_flush(struct interface *ifp)
+static void schedule_flush(struct interface *ifp)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     unsigned msecs = jitter(babel_ifp, 0);
@@ -773,8 +891,7 @@ schedule_flush(struct interface *ifp)
     set_timeout(&babel_ifp->flush_timeout, msecs);
 }
 
-static void
-schedule_flush_now(struct interface *ifp)
+static void schedule_flush_now(struct interface *ifp)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     /* Almost now */
@@ -785,8 +902,7 @@ schedule_flush_now(struct interface *ifp)
     set_timeout(&babel_ifp->flush_timeout, msecs);
 }
 
-static void
-schedule_unicast_flush(unsigned msecs)
+static void schedule_unicast_flush(unsigned msecs)
 {
     if(!unicast_neighbour)
         return;
@@ -798,16 +914,14 @@ schedule_unicast_flush(unsigned msecs)
         babel_now.tv_sec + (babel_now.tv_usec / 1000 + msecs) / 1000;
 }
 
-static void
-ensure_space(struct interface *ifp, int space)
+static void ensure_space(struct interface *ifp, int space)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     if(babel_ifp->bufsize - babel_ifp->buffered < space)
         flushbuf(ifp);
 }
 
-static void
-start_message(struct interface *ifp, int type, int len)
+static void start_message(struct interface *ifp, int type, int len)
 {
   babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     if(babel_ifp->bufsize - babel_ifp->buffered < len + 2)
@@ -816,8 +930,7 @@ start_message(struct interface *ifp, int type, int len)
     babel_ifp->sendbuf[babel_ifp->buffered++] = len;
 }
 
-static void
-end_message(struct interface *ifp, int type, int bytes)
+static void end_message(struct interface *ifp, int type, int bytes)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     assert(babel_ifp->buffered >= bytes + 2 &&
@@ -826,23 +939,20 @@ end_message(struct interface *ifp, int type, int bytes)
     schedule_flush(ifp);
 }
 
-static void
-accumulate_byte(struct interface *ifp, unsigned char value)
+static void accumulate_byte(struct interface *ifp, unsigned char value)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     babel_ifp->sendbuf[babel_ifp->buffered++] = value;
 }
 
-static void
-accumulate_short(struct interface *ifp, unsigned short value)
+static void accumulate_short(struct interface *ifp, unsigned short value)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     DO_HTONS(babel_ifp->sendbuf + babel_ifp->buffered, value);
     babel_ifp->buffered += 2;
 }
 
-static void
-accumulate_int(struct interface *ifp, unsigned int value)
+static void accumulate_int(struct interface *ifp, unsigned int value)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     DO_HTONL(babel_ifp->sendbuf + babel_ifp->buffered, value);
@@ -858,8 +968,7 @@ accumulate_bytes(struct interface *ifp,
     babel_ifp->buffered += len;
 }
 
-static int
-start_unicast_message(struct neighbour *neigh, int type, int len)
+static int start_unicast_message(struct neighbour *neigh, int type, int len)
 {
     if(unicast_neighbour) {
         if(neigh != unicast_neighbour ||
@@ -882,8 +991,7 @@ start_unicast_message(struct neighbour *neigh, int type, int len)
     return 1;
 }
 
-static void
-end_unicast_message(struct neighbour *neigh, int type, int bytes)
+static void end_unicast_message(struct neighbour *neigh, int type, int bytes)
 {
     assert(unicast_neighbour == neigh && unicast_buffered >= bytes + 2 &&
            unicast_buffer[unicast_buffered - bytes - 2] == type &&
@@ -904,8 +1012,7 @@ accumulate_unicast_short(struct neighbour *neigh, unsigned short value)
     unicast_buffered += 2;
 }
 
-static void
-accumulate_unicast_int(struct neighbour *neigh, unsigned int value)
+static void accumulate_unicast_int(struct neighbour *neigh, unsigned int value)
 {
     DO_HTONL(unicast_buffer + unicast_buffered, value);
     unicast_buffered += 4;
@@ -925,15 +1032,16 @@ send_ack(struct neighbour *neigh, unsigned short nonce, unsigned short interval)
     int rc;
     debugf(BABEL_DEBUG_COMMON,"Sending ack (%04x) to %s on %s.",
            nonce, format_address(neigh->address), neigh->ifp->name);
-    rc = start_unicast_message(neigh, MESSAGE_ACK, 2); if(rc < 0) return;
+    rc = start_unicast_message(neigh, MESSAGE_ACK, 2);
+    if(rc < 0)
+        return;
     accumulate_unicast_short(neigh, nonce);
     end_unicast_message(neigh, MESSAGE_ACK, 2);
     /* Roughly yields a value no larger than 3/2, so this meets the deadline */
     schedule_unicast_flush(roughly(interval * 6));
 }
 
-void
-send_hello_noupdate(struct interface *ifp, unsigned interval)
+void send_hello_noupdate(struct interface *ifp, unsigned interval)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     /* This avoids sending multiple hellos in a single packet, which breaks
@@ -951,12 +1059,12 @@ send_hello_noupdate(struct interface *ifp, unsigned interval)
            babel_ifp->hello_seqno, interval, ifp->name);
 
     start_message(ifp, MESSAGE_HELLO,
-                  (babel_ifp->flags & BABEL_IF_TIMESTAMPS) ? 12 : 6);
+                  (CHECK_FLAG(babel_ifp->flags, BABEL_IF_TIMESTAMPS) ? 12 : 6));
     babel_ifp->buffered_hello = babel_ifp->buffered - 2;
     accumulate_short(ifp, 0);
     accumulate_short(ifp, babel_ifp->hello_seqno);
     accumulate_short(ifp, interval > 0xFFFF ? 0xFFFF : interval);
-    if(babel_ifp->flags & BABEL_IF_TIMESTAMPS) {
+    if (CHECK_FLAG(babel_ifp->flags, BABEL_IF_TIMESTAMPS)) {
         /* Sub-TLV containing the local time of emission. We use a
            Pad4 sub-TLV, which we'll fill just before sending. */
         accumulate_byte(ifp, SUBTLV_PADN);
@@ -964,11 +1072,10 @@ send_hello_noupdate(struct interface *ifp, unsigned interval)
         accumulate_int(ifp, 0);
     }
     end_message(ifp, MESSAGE_HELLO,
-                (babel_ifp->flags & BABEL_IF_TIMESTAMPS) ? 12 : 6);
+                CHECK_FLAG(babel_ifp->flags, BABEL_IF_TIMESTAMPS) ? 12 : 6);
 }
 
-void
-send_hello(struct interface *ifp)
+void send_hello(struct interface *ifp)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     send_hello_noupdate(ifp, (babel_ifp->hello_interval + 9) / 10);
@@ -979,8 +1086,7 @@ send_hello(struct interface *ifp)
         send_marginal_ihu(ifp);
 }
 
-void
-flush_unicast(int dofree)
+void flush_unicast(int dofree)
 {
     struct sockaddr_in6 sin6;
     int rc;
@@ -1010,10 +1116,10 @@ flush_unicast(int dofree)
             flog_err(EC_BABEL_PACKET, "send(unicast): %s",
 		      safe_strerror(errno));
     } else {
-        flog_err(EC_BABEL_PACKET,
-		  "Warning: bucket full, dropping unicast packet to %s if %s.",
-                  format_address(unicast_neighbour->address),
-                  unicast_neighbour->ifp->name);
+	    flog_err(EC_BABEL_PACKET,
+		     "Bucket full, dropping unicast packet to %s if %s.",
+		     format_address(unicast_neighbour->address),
+		     unicast_neighbour->ifp->name);
     }
 
  done:
@@ -1057,7 +1163,7 @@ really_send_update(struct interface *ifp,
     /* Worst case */
     ensure_space(ifp, 20 + 12 + 28);
 
-    v4 = plen >= 96 && v4mapped(prefix);
+    v4 = (plen >= 96) && v4mapped(prefix);
 
     if(v4) {
         if(!babel_ifp->ipv4)
@@ -1082,7 +1188,7 @@ really_send_update(struct interface *ifp,
                 omit++;
         }
         if(!babel_ifp->have_buffered_prefix || plen >= 48)
-            flags |= 0x80;
+            SET_FLAG(flags, 0x80);
         real_prefix = prefix;
         real_plen = plen;
     }
@@ -1090,7 +1196,7 @@ really_send_update(struct interface *ifp,
     if(!babel_ifp->have_buffered_id
        || memcmp(id, babel_ifp->buffered_id, 8) != 0) {
         if(real_plen == 128 && memcmp(real_prefix + 8, id, 8) == 0) {
-            flags |= 0x40;
+            SET_FLAG(flags, 0x40);
         } else {
             start_message(ifp, MESSAGE_ROUTER_ID, 10);
             accumulate_short(ifp, 0);
@@ -1115,19 +1221,20 @@ really_send_update(struct interface *ifp,
     if(channels_len >= 0) {
         accumulate_byte(ifp, 2);
         accumulate_byte(ifp, channels_len);
-        accumulate_bytes(ifp, channels, channels_len);
+
+	if (channels && channels_len > 0)
+		accumulate_bytes(ifp, channels, channels_len);
     }
     end_message(ifp, MESSAGE_UPDATE, 10 + (real_plen + 7) / 8 - omit +
                 channels_size);
 
-    if(flags & 0x80) {
+    if (CHECK_FLAG(flags, 0x80)) {
         memcpy(babel_ifp->buffered_prefix, prefix, 16);
         babel_ifp->have_buffered_prefix = 1;
     }
 }
 
-static int
-compare_buffered_updates(const void *av, const void *bv)
+static int compare_buffered_updates(const void *av, const void *bv)
 {
     const struct buffered_update *a = av, *b = bv;
     int rc, v4a, v4b, ma, mb;
@@ -1160,8 +1267,7 @@ compare_buffered_updates(const void *av, const void *bv)
     return memcmp(a->prefix, b->prefix, 16);
 }
 
-void
-flushupdates(struct interface *ifp)
+void flushupdates(struct interface *ifp)
 {
     babel_interface_nfo *babel_ifp = NULL;
     struct xroute *xroute;
@@ -1171,7 +1277,7 @@ flushupdates(struct interface *ifp)
     int i;
 
     if(ifp == NULL) {
-	struct vrf *vrf = vrf_lookup_by_id(VRF_DEFAULT);
+		struct vrf *vrf = vrf_lookup_by_id(VRF_DEFAULT);
         struct interface *ifp_aux;
         FOR_ALL_INTERFACES(vrf, ifp_aux)
             flushupdates(ifp_aux);
@@ -1244,7 +1350,7 @@ flushupdates(struct interface *ifp)
                 if(metric < INFINITY)
                     satisfy_request(route->src->prefix, route->src->plen,
                                     seqno, route->src->id, ifp);
-                if((babel_ifp->flags & BABEL_IF_SPLIT_HORIZON) &&
+                if(CHECK_FLAG(babel_ifp->flags, BABEL_IF_SPLIT_HORIZON) &&
                    route->neigh->ifp == ifp)
                     continue;
 
@@ -1286,11 +1392,11 @@ flushupdates(struct interface *ifp)
     babel_ifp->update_flush_timeout.tv_usec = 0;
 }
 
-static void
-schedule_update_flush(struct interface *ifp, int urgent)
+static void schedule_update_flush(struct interface *ifp, int urgent)
 {
     babel_interface_nfo *babel_ifp = babel_get_if_nfo(ifp);
     unsigned msecs;
+
     msecs = update_jitter(babel_ifp, urgent);
     if(babel_ifp->update_flush_timeout.tv_sec != 0 &&
        timeval_minus_msec(&babel_ifp->update_flush_timeout, &babel_now) < msecs)
@@ -1400,10 +1506,10 @@ send_update_resend(struct interface *ifp,
     record_resend(RESEND_UPDATE, prefix, plen, 0, NULL, NULL, resend_delay);
 }
 
-void
-send_wildcard_retraction(struct interface *ifp)
+void send_wildcard_retraction(struct interface *ifp)
 {
     babel_interface_nfo *babel_ifp = NULL;
+
     if(ifp == NULL) {
 	struct vrf *vrf = vrf_lookup_by_id(VRF_DEFAULT);
         struct interface *ifp_aux;
@@ -1429,14 +1535,12 @@ send_wildcard_retraction(struct interface *ifp)
     babel_ifp->have_buffered_id = 0;
 }
 
-void
-update_myseqno(void)
+void update_myseqno(void)
 {
     myseqno = seqno_plus(myseqno, 1);
 }
 
-void
-send_self_update(struct interface *ifp)
+void send_self_update(struct interface *ifp)
 {
     struct xroute_stream *xroutes;
     if(ifp == NULL) {
@@ -1464,8 +1568,7 @@ send_self_update(struct interface *ifp)
     }
 }
 
-void
-send_ihu(struct neighbour *neigh, struct interface *ifp)
+void send_ihu(struct neighbour *neigh, struct interface *ifp)
 {
     babel_interface_nfo *babel_ifp = NULL;
     int rxcost, interval;
@@ -1517,7 +1620,7 @@ send_ihu(struct neighbour *neigh, struct interface *ifp)
 
     ll = linklocal(neigh->address);
 
-    if((babel_ifp->flags & BABEL_IF_TIMESTAMPS) && neigh->hello_send_us
+    if(CHECK_FLAG(babel_ifp->flags, BABEL_IF_TIMESTAMPS) && neigh->hello_send_us
        /* Checks whether the RTT data is not too old to be sent. */
        && timeval_minus_msec(&babel_now,
                              &neigh->hello_rtt_receive_time) < 1000000) {
@@ -1572,14 +1675,13 @@ send_ihu(struct neighbour *neigh, struct interface *ifp)
 }
 
 /* Send IHUs to all marginal neighbours */
-void
-send_marginal_ihu(struct interface *ifp)
+void send_marginal_ihu(struct interface *ifp)
 {
     struct neighbour *neigh;
     FOR_ALL_NEIGHBOURS(neigh) {
         if(ifp && neigh->ifp != ifp)
             continue;
-        if(neigh->txcost >= 384 || (neigh->reach & 0xF000) != 0xF000)
+        if(neigh->txcost >= 384 || CHECK_FLAG(neigh->reach, 0xF000) != 0xF000)
             send_ihu(neigh, ifp);
     }
 }

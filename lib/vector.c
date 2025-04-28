@@ -1,30 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* Generic vector interface routine
  * Copyright (C) 1997 Kunihiro Ishiguro
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
+#include <string.h>
 
 #include "vector.h"
 #include "memory.h"
 
-DEFINE_MTYPE_STATIC(LIB, VECTOR, "Vector")
-DEFINE_MTYPE_STATIC(LIB, VECTOR_INDEX, "Vector index")
+DEFINE_MTYPE_STATIC(LIB, VECTOR, "Vector");
+DEFINE_MTYPE_STATIC(LIB, VECTOR_INDEX, "Vector index");
 
 /* Initialize vector : allocate memory and return vector. */
 vector vector_init(unsigned int size)
@@ -37,44 +23,45 @@ vector vector_init(unsigned int size)
 
 	v->alloced = size;
 	v->active = 0;
+	v->count = 0;
+	v->dynamic = true;
 	v->index = XCALLOC(MTYPE_VECTOR_INDEX, sizeof(void *) * size);
 	return v;
 }
 
 void vector_free(vector v)
 {
-	XFREE(MTYPE_VECTOR_INDEX, v->index);
-	XFREE(MTYPE_VECTOR, v);
+	if (v->alloced)
+		XFREE(MTYPE_VECTOR_INDEX, v->index);
+	if (v->dynamic)
+		XFREE(MTYPE_VECTOR, v);
 }
 
-vector vector_copy(vector v)
-{
-	unsigned int size;
-	vector new = XCALLOC(MTYPE_VECTOR, sizeof(struct _vector));
-
-	new->active = v->active;
-	new->alloced = v->alloced;
-
-	size = sizeof(void *) * (v->alloced);
-	new->index = XCALLOC(MTYPE_VECTOR_INDEX, size);
-	memcpy(new->index, v->index, size);
-
-	return new;
-}
-
-/* Check assigned index, and if it runs short double index pointer */
+/* resize vector to a minimum of num
+ * may resize larger to avoid excessive realloc overhead
+ */
 void vector_ensure(vector v, unsigned int num)
 {
+	unsigned int newsz;
+
 	if (v->alloced > num)
 		return;
 
-	v->index = XREALLOC(MTYPE_VECTOR_INDEX, v->index,
-			    sizeof(void *) * (v->alloced * 2));
-	memset(&v->index[v->alloced], 0, sizeof(void *) * v->alloced);
-	v->alloced *= 2;
+	newsz = MAX(v->active * 2, num + 1);
 
-	if (v->alloced <= num)
-		vector_ensure(v, num);
+	if (!v->alloced && v->index) {
+		/* currently using global variable, not malloc'd memory */
+		void **orig_index = v->index;
+
+		v->index = XMALLOC(MTYPE_VECTOR_INDEX, sizeof(void *) * newsz);
+		memcpy(v->index, orig_index, v->active * sizeof(void *));
+		v->alloced = v->active;
+	} else
+		v->index = XREALLOC(MTYPE_VECTOR_INDEX, v->index,
+				    sizeof(void *) * newsz);
+
+	memset(&v->index[v->alloced], 0, sizeof(void *) * (newsz - v->alloced));
+	v->alloced = newsz;
 }
 
 /* This function only returns next empty slot index.  It dose not mean
@@ -83,6 +70,9 @@ void vector_ensure(vector v, unsigned int num)
 int vector_empty_slot(vector v)
 {
 	unsigned int i;
+
+	if (v->active == v->count)
+		return v->active;
 
 	if (v->active == 0)
 		return 0;
@@ -102,6 +92,10 @@ int vector_set(vector v, void *val)
 	i = vector_empty_slot(v);
 	vector_ensure(v, i);
 
+	if (v->index[i])
+		v->count--;
+	if (val)
+		v->count++;
 	v->index[i] = val;
 
 	if (v->active <= i)
@@ -115,6 +109,10 @@ int vector_set_index(vector v, unsigned int i, void *val)
 {
 	vector_ensure(v, i);
 
+	if (v->index[i])
+		v->count--;
+	if (val)
+		v->count++;
 	v->index[i] = val;
 
 	if (v->active <= i)
@@ -141,8 +139,11 @@ void *vector_lookup_ensure(vector v, unsigned int i)
 /* Unset value at specified index slot. */
 void vector_unset(vector v, unsigned int i)
 {
-	if (i >= v->alloced)
+	if (i >= v->active)
 		return;
+
+	if (v->index[i])
+		v->count--;
 
 	v->index[i] = NULL;
 
@@ -157,6 +158,9 @@ void vector_remove(vector v, unsigned int ix)
 {
 	if (ix >= v->active)
 		return;
+
+	if (v->index[ix])
+		v->count--;
 
 	int n = (--v->active) - ix;
 
@@ -181,6 +185,7 @@ void vector_unset_value(vector v, void *val)
 	for (i = 0; i < v->active; i++)
 		if (v->index[i] == val) {
 			v->index[i] = NULL;
+			v->count--;
 			break;
 		}
 
@@ -188,19 +193,6 @@ void vector_unset_value(vector v, void *val)
 		do
 			v->active--;
 		while (i && v->index[--i] == NULL);
-}
-
-/* Count the number of not emplty slot. */
-unsigned int vector_count(vector v)
-{
-	unsigned int i;
-	unsigned count = 0;
-
-	for (i = 0; i < v->active; i++)
-		if (v->index[i] != NULL)
-			count++;
-
-	return count;
 }
 
 void vector_to_array(vector v, void ***dest, int *argc)

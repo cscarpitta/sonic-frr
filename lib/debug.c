@@ -1,46 +1,83 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Debugging utilities.
  * Copyright (C) 2018  Cumulus Networks, Inc.
  * Quentin Young
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 #include <zebra.h>
+#include "typesafe.h"
 #include "debug.h"
 #include "command.h"
 
-static const struct debug_callbacks *callbacks;
+static struct debug_list_head debug_head;
+
+DECLARE_LIST(debug_list, struct debug, item);
 
 /* All code in this section should be reentrant and MT-safe */
 
-DEFUN_NOSH(debug_all, debug_all_cmd, "[no] debug all",
-	   NO_STR DEBUG_STR "Toggle all debugging output\n")
+DEFUN_NOSH (debug_all,
+	    debug_all_cmd,
+	    "[no] debug all",
+	    NO_STR DEBUG_STR
+	    "Toggle all debugging output\n")
 {
+	struct debug *debug;
 	bool set = !strmatch(argv[0]->text, "no");
 	uint32_t mode = DEBUG_NODE2MODE(vty->node);
 
-	if (callbacks->debug_set_all)
-		callbacks->debug_set_all(mode, set);
+	frr_each (debug_list, &debug_head, debug) {
+		DEBUG_MODE_SET(debug, mode, set);
+
+		/* If all modes have been turned off, don't preserve options. */
+		if (!DEBUG_MODE_CHECK(debug, DEBUG_MODE_ALL))
+			DEBUG_CLEAR(debug);
+	}
+
 	return CMD_SUCCESS;
 }
 
 /* ------------------------------------------------------------------------- */
 
-void debug_init(const struct debug_callbacks *cb)
+void debug_status_write(struct vty *vty)
 {
-	callbacks = cb;
+	struct debug *debug;
+
+	frr_each (debug_list, &debug_head, debug) {
+		if (DEBUG_MODE_CHECK(debug, DEBUG_MODE_ALL))
+			vty_out(vty, "  %s debugging is on\n", debug->desc);
+	}
+}
+
+static int config_write_debug(struct vty *vty)
+{
+	struct debug *debug;
+
+	frr_each (debug_list, &debug_head, debug) {
+		if (DEBUG_MODE_CHECK(debug, DEBUG_MODE_CONF))
+			vty_out(vty, "%s\n", debug->conf);
+	}
+
+	return 0;
+}
+
+static struct cmd_node debug_node = {
+	.name = "debug",
+	.node = LIB_DEBUG_NODE,
+	.prompt = "",
+	.config_write = config_write_debug,
+};
+
+void debug_install(struct debug *debug)
+{
+	debug_list_add_tail(&debug_head, debug);
+}
+
+void debug_init(void)
+{
+	debug_list_init(&debug_head);
+
+	install_node(&debug_node);
+
 	install_element(ENABLE_NODE, &debug_all_cmd);
 	install_element(CONFIG_NODE, &debug_all_cmd);
 }

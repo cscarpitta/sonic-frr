@@ -54,22 +54,22 @@ In a nutshell, the current implementation provides the following features
 Enabling RPKI
 -------------
 
-.. index:: rpki
+You must install ``frr-rpki-rtrlib`` additional package for RPKI support,
+otherwise ``bgpd`` daemon won't startup.
+
 .. clicmd:: rpki
 
    This command enables the RPKI configuration mode. Most commands that start
    with *rpki* can only be used in this mode.
 
-   When it is used in a telnet session, leaving of this mode cause rpki to be
-   initialized.
+   This command is available either in *configure node* for default *vrf* or
+   in *vrf node* for specific *vrf*. When it is used in a telnet session,
+   leaving of this mode cause rpki to be initialized.
 
    Executing this command alone does not activate prefix validation. You need
    to configure at least one reachable cache server. See section
    :ref:`configuring-rpki-rtr-cache-servers` for configuring a cache server.
 
-.. index:: RPKI and daemons
-
-When first installing FRR with RPKI support from the pre-packaged binaries.
 Remember to add ``-M rpki`` to the variable ``bgpd_options`` in
 :file:`/etc/frr/daemons` , like so::
 
@@ -91,6 +91,9 @@ Examples of the error::
    router(config)# rpki
    % [BGP] Unknown command: rpki
 
+   router(config-vrf)# rpki
+   % [BGP] Unknown command: rpki
+
 Note that the RPKI commands will be available in vtysh when running
 ``find rpki`` regardless of whether the module is loaded.
 
@@ -99,98 +102,67 @@ Note that the RPKI commands will be available in vtysh when running
 Configuring RPKI/RTR Cache Servers
 ----------------------------------
 
-The following commands are independent of a specific cache server.
+RPKI/RTR can be configured independently, either in configure node, or in *vrf*
+sub context. If configured in configure node, the core *bgp* instance of default
+*vrf* is impacted by the configuration.
 
-.. index:: rpki polling_period (1-3600)
+Each RPKI/RTR context is mapped to a *vrf* and can be made up of a specific list
+of cache-servers, and specific settings.
+
+The following commands are available for independent of a specific cache server.
+
 .. clicmd:: rpki polling_period (1-3600)
-
-.. index:: no rpki polling_period
-.. clicmd:: no rpki polling_period
 
    Set the number of seconds the router waits until the router asks the cache
    again for updated data.
 
    The default value is 300 seconds.
 
-.. index:: rpki timeout <1-4,294,967,296>
-.. clicmd:: rpki timeout <1-4,294,967,296>
+.. clicmd:: rpki expire_interval (600-172800)
 
-.. index:: no rpki timeout
-.. clicmd:: no rpki timeout
+   Set the number of seconds the router waits until the router expires the cache.
 
-   Set the number of seconds the router waits for the cache reply. If the cache
-   server is not replying within this time period, the router deletes all
-   received prefix records from the prefix table.
+   The default value is 7200 seconds.
+
+.. clicmd:: rpki retry_interval (1-7200)
+
+   Set the number of seconds the router waits until retrying to connect to the
+   cache server.
 
    The default value is 600 seconds.
 
-.. index:: rpki initial-synchronisation-timeout <1-4,294,967,296>
-.. clicmd:: rpki initial-synchronisation-timeout <1-4,294,967,296>
+.. clicmd:: rpki cache tcp HOST PORT [source A.B.C.D] preference (1-255)
 
-.. index:: no rpki initial-synchronisation-timeout
-.. clicmd:: no rpki initial-synchronisation-timeout
+   Add a TCP cache server to the socket.
 
-   Set the number of seconds until the first synchronization with the cache
-   server needs to be completed. If the timeout expires, BGP routing is started
-   without RPKI. The router will try to establish the cache server connection in
-   the background.
+.. clicmd:: rpki cache ssh HOST PORT SSH_USERNAME SSH_PRIVKEY_PATH [KNOWN_HOSTS_PATH] [source A.B.C.D] preference (1-255)
 
-   The default value is 30 seconds.
-
-   The following commands configure one or multiple cache servers.
-
-.. index:: rpki cache (A.B.C.D|WORD) PORT [SSH_USERNAME] [SSH_PRIVKEY_PATH] [SSH_PUBKEY_PATH] [KNOWN_HOSTS_PATH] PREFERENCE
-.. clicmd:: rpki cache (A.B.C.D|WORD) PORT [SSH_USERNAME] [SSH_PRIVKEY_PATH] [SSH_PUBKEY_PATH] [KNOWN_HOSTS_PATH] PREFERENCE
-
-.. index:: no rpki cache (A.B.C.D|WORD) [PORT] PREFERENCE
-.. clicmd:: no rpki cache (A.B.C.D|WORD) [PORT] PREFERENCE
-
-   Add a cache server to the socket. By default, the connection between router
-   and cache server is based on plain TCP. Protecting the connection between
-   router and cache server by SSH is optional. Deleting a socket removes the
-   associated cache server and terminates the existing connection.
-
-   A.B.C.D|WORD
-      Address of the cache server.
-
-   PORT
-      Port number to connect to the cache server
+   Add a SSH cache server to the socket.
 
    SSH_USERNAME
       SSH username to establish an SSH connection to the cache server.
 
-
    SSH_PRIVKEY_PATH
       Local path that includes the private key file of the router.
-
-
-   SSH_PUBKEY_PATH
-      Local path that includes the public key file of the router.
-
 
    KNOWN_HOSTS_PATH
       Local path that includes the known hosts file. The default value depends
       on the configuration of the operating system environment, usually
       :file:`~/.ssh/known_hosts`.
 
+   source A.B.C.D
+      Source address of the RPKI connection to access cache server.
 
 .. _validating-bgp-updates:
 
 Validating BGP Updates
 ----------------------
 
-.. index:: match rpki notfound|invalid|valid
 .. clicmd:: match rpki notfound|invalid|valid
 
-.. index:: no match rpki notfound|invalid|valid
-.. clicmd:: no match rpki notfound|invalid|valid
 
     Create a clause for a route map to match prefixes with the specified RPKI
     state.
-
-    **Note** that the matching of invalid prefixes requires that invalid
-    prefixes are considered for best path selection, i.e.,
-    ``bgp bestpath prefix-validate disallow-invalid`` is not enabled.
 
     In the following example, the router prefers valid routes over invalid
     prefixes because invalid routes have a lower local preference.
@@ -198,7 +170,7 @@ Validating BGP Updates
     .. code-block:: frr
 
        ! Allow for invalid routes in route selection process
-       route bgp 60001
+       route bgp 65001
        !
        ! Set local preference of invalid prefixes to 10
        route-map rpki permit 10
@@ -210,17 +182,20 @@ Validating BGP Updates
         match rpki valid
         set local-preference 500
 
+.. clicmd:: match rpki-extcommunity notfound|invalid|valid
+
+   Create a clause for a route map to match prefixes with the specified RPKI
+   state, that is derived from the Origin Validation State extended community
+   attribute (OVS). OVS extended community is non-transitive and is exchanged
+   only between iBGP peers.
 
 .. _debugging:
 
 Debugging
 ---------
 
-.. index:: debug rpki
 .. clicmd:: debug rpki
 
-.. index:: no debug rpki
-.. clicmd:: no debug rpki
 
    Enable or disable debugging output for RPKI.
 
@@ -229,17 +204,44 @@ Debugging
 Displaying RPKI
 ---------------
 
-.. index:: show rpki prefix-table
-.. clicmd:: show rpki prefix-table
+.. clicmd:: show rpki configuration [vrf NAME] [json]
+
+   Display RPKI configuration state including timers values.
+
+.. clicmd:: show rpki prefix <A.B.C.D/M|X:X::X:X/M> [ASN] [vrf NAME] [json]
+
+   Display validated prefixes received from the cache servers filtered
+   by the specified prefix.  The AS number space has been increased
+   to allow the choice of using AS 0 because RFC-7607 specifically
+   calls out the usage of 0 in a special case.
+
+.. clicmd:: show rpki as-number ASN [vrf NAME] [json]
+
+   Display validated prefixes received from the cache servers filtered
+   by ASN.  The usage of AS 0 is allowed because RFC-76067 specifically
+   calls out the usage of 0 in a special case.
+
+.. clicmd:: show rpki prefix-table [vrf NAME] [json]
 
    Display all validated prefix to origin AS mappings/records which have been
    received from the cache servers and stored in the router. Based on this data,
    the router validates BGP Updates.
 
-.. index:: show rpki cache-connection
-.. clicmd:: show rpki cache-connection
+.. clicmd:: show rpki cache-server [vrf NAME] [json]
 
    Display all configured cache servers, whether active or not.
+
+.. clicmd:: show rpki cache-connection [vrf NAME] [json]
+
+   Display all cache connections, and show which is connected or not.
+
+.. clicmd:: show bgp [vrf NAME] [afi] [safi] <A.B.C.D|A.B.C.D/M|X:X::X:X|X:X::X:X/M> rpki <valid|invalid|notfound>
+
+   Display for the specified prefix or address the bgp paths that match the given rpki state.
+
+.. clicmd:: show bgp [vrf NAME] [afi] [safi] rpki <valid|invalid|notfound>
+
+   Display all prefixes that match the given rpki state.
 
 RPKI Configuration Example
 --------------------------
@@ -253,24 +255,52 @@ RPKI Configuration Example
    debug bgp keepalives
    debug rpki
    !
+   vrf VRF1
+    rpki
+     rpki polling_period 1000
+     rpki timeout 10
+      ! SSH Example:
+      rpki cache ssh example.com 22 rtr-ssh ./ssh_key/id_rsa preference 1
+      ! TCP Example:
+      rpki cache tcp rpki-validator.realmv6.org 8282 preference 2
+      exit
+    !
+    exit-vrf
+   !
    rpki
     rpki polling_period 1000
     rpki timeout 10
      ! SSH Example:
-     rpki cache example.com 22 rtr-ssh ./ssh_key/id_rsa ./ssh_key/id_rsa.pub preference 1
+     rpki cache ssh example.com source 198.51.100.223 22 rtr-ssh ./ssh_key/id_rsa preference 1
      ! TCP Example:
-     rpki cache rpki-validator.realmv6.org 8282 preference 2
+     rpki cache tcp rpki-validator.realmv6.org 8282 preference 2
      exit
    !
-   router bgp 60001
-    bgp router-id 141.22.28.223
-    network 192.168.0.0/16
-    neighbor 123.123.123.0 remote-as 60002
-    neighbor 123.123.123.0 route-map rpki in
+   router bgp 65001
+    bgp router-id 198.51.100.223
+    neighbor 203.0.113.1 remote-as 65002
+    neighbor 203.0.113.1 update-source 198.51.100.223
+    address-family ipv4
+     network 192.0.2.0/24
+     neighbor 203.0.113.1 route-map rpki in
+    exit-address-family
    !
     address-family ipv6
-     neighbor 123.123.123.0 activate
-      neighbor 123.123.123.0 route-map rpki in
+     neighbor 203.0.113.1 activate
+     neighbor 203.0.113.1 route-map rpki in
+    exit-address-family
+   !
+   router bgp 65001 vrf VRF1
+    bgp router-id 198.51.100.223
+    neighbor 203.0.113.1 remote-as 65002
+    address-family ipv4
+     network 192.0.2.0/24
+     neighbor 203.0.113.1 route-map rpki in
+    exit-address-family
+   !
+    address-family ipv6
+     neighbor 203.0.113.1 activate
+     neighbor 203.0.113.1 route-map rpki in
     exit-address-family
    !
    route-map rpki permit 10
@@ -288,5 +318,5 @@ RPKI Configuration Example
    route-map rpki permit 40
    !
 
-.. [Securing-BGP] Geoff Huston, Randy Bush: Securing BGP, In: The Internet Protocol Journal, Volume 14, No. 2, 2011. <http://www.cisco.com/web/about/ac123/ac147/archived_issues/ipj_14-2/142_bgp.html>
-.. [Resource-Certification] Geoff Huston: Resource Certification, In: The Internet Protocol Journal, Volume 12, No.1, 2009. <http://www.cisco.com/web/about/ac123/ac147/archived_issues/ipj_12-1/121_resource.html>
+.. [Securing-BGP] Geoff Huston, Randy Bush: Securing BGP, In: The Internet Protocol Journal, Volume 14, No. 2, 2011. <https://www.cisco.com/c/dam/en_us/about/ac123/ac147/archived_issues/ipj_14-2/ipj_14-2.pdf>
+.. [Resource-Certification] Geoff Huston: Resource Certification, In: The Internet Protocol Journal, Volume 12, No.1, 2009. <https://www.cisco.com/c/dam/en_us/about/ac123/ac147/archived_issues/ipj_12-1/ipj_12-1.pdf>

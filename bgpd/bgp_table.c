@@ -1,21 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* BGP routing table
  * Copyright (C) 1998, 2001 Kunihiro Ishiguro
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
@@ -26,10 +11,12 @@
 #include "queue.h"
 #include "filter.h"
 #include "command.h"
+#include "printfrr.h"
 
 #include "bgpd/bgpd.h"
 #include "bgpd/bgp_table.h"
 #include "bgp_addpath.h"
+#include "bgp_trace.h"
 
 void bgp_table_lock(struct bgp_table *rt)
 {
@@ -60,44 +47,85 @@ void bgp_table_finish(struct bgp_table **rt)
 }
 
 /*
- * bgp_node_create
+ * bgp_dest_lock_node
  */
-static struct route_node *bgp_node_create(route_table_delegate_t *delegate,
-					  struct route_table *table)
+struct bgp_dest *bgp_dest_lock_node(struct bgp_dest *dest)
 {
-	struct bgp_node *node;
-	node = XCALLOC(MTYPE_BGP_NODE, sizeof(struct bgp_node));
+	frrtrace(1, frr_bgp, bgp_dest_lock, dest);
+	struct route_node *rn = route_lock_node(bgp_dest_to_rnode(dest));
 
-	RB_INIT(bgp_adj_out_rb, &node->adj_out);
-	return bgp_node_to_rnode(node);
+	return bgp_dest_from_rnode(rn);
+}
+
+/*
+ * bgp_dest_get_prefix_str
+ */
+const char *bgp_dest_get_prefix_str(struct bgp_dest *dest)
+{
+	const struct prefix *p = NULL;
+	static char str[PREFIX_STRLEN] = {0};
+
+	p = bgp_dest_get_prefix(dest);
+	if (p)
+		return prefix2str(p, str, sizeof(str));
+
+	return NULL;
+}
+
+/*
+ * bgp_dest_unlock_node
+ */
+inline struct bgp_dest *bgp_dest_unlock_node(struct bgp_dest *dest)
+{
+	frrtrace(1, frr_bgp, bgp_dest_unlock, dest);
+	bgp_delete_listnode(dest);
+	struct route_node *rn = bgp_dest_to_rnode(dest);
+
+	if (rn->lock == 1) {
+		struct bgp_table *rt = bgp_dest_table(dest);
+		if (rt->bgp) {
+			bgp_addpath_free_node_data(&rt->bgp->tx_addpath,
+						   &dest->tx_addpath, rt->afi,
+						   rt->safi);
+		}
+		XFREE(MTYPE_BGP_NODE, dest);
+		dest = NULL;
+		rn->info = NULL;
+	}
+	route_unlock_node(rn);
+
+	return dest;
 }
 
 /*
  * bgp_node_destroy
  */
 static void bgp_node_destroy(route_table_delegate_t *delegate,
-			     struct route_table *table, struct route_node *node)
+							struct route_table *table, struct route_node *node)
 {
-	struct bgp_node *bgp_node;
+	struct bgp_dest *dest;
 	struct bgp_table *rt;
-	bgp_node = bgp_node_from_rnode(node);
+	dest = bgp_dest_from_rnode(node);
 	rt = table->info;
-
-	if (rt->bgp) {
-		bgp_addpath_free_node_data(&rt->bgp->tx_addpath,
-					 &bgp_node->tx_addpath,
-					 rt->afi, rt->safi);
+	if (dest) {
+		if (rt->bgp) {
+			bgp_addpath_free_node_data(&rt->bgp->tx_addpath,
+										&dest->tx_addpath,
+										rt->afi, rt->safi);
+		}
+		XFREE(MTYPE_BGP_NODE, dest);
+		node->info = NULL;
 	}
 
-	XFREE(MTYPE_BGP_NODE, bgp_node);
+	XFREE(MTYPE_ROUTE_NODE, node);
 }
 
 /*
  * Function vector to customize the behavior of the route table
  * library for BGP route tables.
  */
-route_table_delegate_t bgp_table_delegate = {.create_node = bgp_node_create,
-					     .destroy_node = bgp_node_destroy};
+route_table_delegate_t bgp_table_delegate = { .create_node = route_node_create,
+					      .destroy_node = bgp_node_destroy };
 
 /*
  * bgp_table_init
@@ -127,65 +155,95 @@ struct bgp_table *bgp_table_init(struct bgp *bgp, afi_t afi, safi_t safi)
 	return rt;
 }
 
-static struct bgp_node *
-bgp_route_next_until_maxlen(struct bgp_node *node, const struct bgp_node *limit,
-			    const uint8_t maxlen)
+/* Delete the route node from the selection deferral route list */
+void bgp_delete_listnode(struct bgp_dest *dest)
 {
-	if (node->l_left && node->p.prefixlen < maxlen
-	    && node->l_left->p.prefixlen <= maxlen) {
-		return bgp_node_from_rnode(node->l_left);
-	}
-	if (node->l_right && node->p.prefixlen < maxlen
-	    && node->l_right->p.prefixlen <= maxlen) {
-		return bgp_node_from_rnode(node->l_right);
-	}
+	const struct route_node *rn = NULL;
+	struct bgp_table *table = NULL;
+	struct bgp *bgp = NULL;
+	afi_t afi;
+	safi_t safi;
 
-	while (node->parent && node != limit) {
-		if (bgp_node_from_rnode(node->parent->l_left) == node
-		    && node->parent->l_right) {
-			return bgp_node_from_rnode(node->parent->l_right);
+	/* If the route to be deleted is selection pending, update the
+	 * route node in gr_info
+	 */
+	if (CHECK_FLAG(dest->flags, BGP_NODE_SELECT_DEFER)) {
+		table = bgp_dest_table(dest);
+
+		if (table) {
+			bgp = table->bgp;
+			afi = table->afi;
+			safi = table->safi;
+		} else
+			return;
+
+		rn = bgp_dest_to_rnode(dest);
+
+		if (bgp && rn && rn->lock == 1) {
+			/* Delete the route from the selection pending list */
+			bgp->gr_info[afi][safi].gr_deferred--;
+			UNSET_FLAG(dest->flags, BGP_NODE_SELECT_DEFER);
 		}
-		node = bgp_node_from_rnode(node->parent);
 	}
-	return NULL;
 }
 
-void bgp_table_range_lookup(const struct bgp_table *table, struct prefix *p,
-			    uint8_t maxlen, struct list *matches)
+struct bgp_dest *bgp_table_subtree_lookup(const struct bgp_table *table,
+					  const struct prefix *p)
 {
-	struct bgp_node *node = bgp_node_from_rnode(table->route_table->top);
-	struct bgp_node *matched = NULL;
+	struct bgp_dest *dest = bgp_dest_from_rnode(table->route_table->top);
+	struct bgp_dest *matched = NULL;
 
-	while (node && node->p.prefixlen <= p->prefixlen
-	       && prefix_match(&node->p, p)) {
-		if (bgp_node_has_bgp_path_info_data(node)
-		    && node->p.prefixlen == p->prefixlen) {
-			matched = node;
+	if (dest == NULL)
+		return NULL;
+
+
+	while (dest) {
+		const struct prefix *dest_p = bgp_dest_get_prefix(dest);
+		struct route_node *node = dest->rn;
+
+		if (dest_p->prefixlen >= p->prefixlen) {
+			if (!prefix_match(p, dest_p))
+				return NULL;
+
+			matched = dest;
 			break;
 		}
-		node = bgp_node_from_rnode(node->link[prefix_bit(
-			&p->u.prefix, node->p.prefixlen)]);
-	}
 
-	if (node == NULL)
-		return;
+		if (!prefix_match(dest_p, p))
+			return NULL;
 
-	if ((matched == NULL && node->p.prefixlen > maxlen) || !node->parent)
-		return;
-	else if (matched == NULL)
-		matched = node = bgp_node_from_rnode(node->parent);
-
-	if (bgp_node_has_bgp_path_info_data(matched)) {
-		bgp_lock_node(matched);
-		listnode_add(matches, matched);
-	}
-
-	while ((node = bgp_route_next_until_maxlen(node, matched, maxlen))) {
-		if (prefix_match(p, &node->p)) {
-			if (bgp_node_has_bgp_path_info_data(node)) {
-				bgp_lock_node(node);
-				listnode_add(matches, node);
-			}
+		if (dest_p->prefixlen == p->prefixlen) {
+			matched = dest;
+			break;
 		}
+
+		dest = bgp_dest_from_rnode(
+			node->link[prefix_bit(&p->u.prefix, dest_p->prefixlen)]);
 	}
+
+	if (!matched)
+		return NULL;
+
+	bgp_dest_lock_node(matched);
+	return matched;
+}
+
+printfrr_ext_autoreg_p("BD", printfrr_bd);
+static ssize_t printfrr_bd(struct fbuf *buf, struct printfrr_eargs *ea,
+			   const void *ptr)
+{
+	const struct bgp_dest *dest = ptr;
+	const struct prefix *p = bgp_dest_get_prefix(dest);
+	char cbuf[PREFIX_STRLEN];
+
+	if (!dest)
+		return bputs(buf, "(null)");
+
+#if !defined(DEV_BUILD)
+	/* need to get the real length even if buffer too small */
+	prefix2str(p, cbuf, sizeof(cbuf));
+	return bputs(buf, cbuf);
+#else
+	return bprintfrr(buf, "%s(%p)", prefix2str(p, cbuf, sizeof(cbuf)), dest);
+#endif
 }

@@ -1,21 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* BGP advertisement and adjacency
  * Copyright (C) 1996, 97, 98, 99, 2000 Kunihiro Ishiguro
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #ifndef _QUAGGA_BGP_ADVERTISE_H
@@ -23,32 +8,25 @@
 
 #include "lib/typesafe.h"
 
-PREDECL_LIST(bgp_adv_fifo)
+PREDECL_DLIST(bgp_adv_fifo);
 
 struct update_subgroup;
+struct bgp_advertise;
+
+PREDECL_DLIST(bgp_advertise_attr_fifo);
+
+struct bgp_advertise_attr;
 
 /* BGP advertise attribute.  */
-struct bgp_advertise_attr {
-	/* Head of advertisement pointer. */
-	struct bgp_advertise *adv;
-
-	/* Reference counter.  */
-	unsigned long refcnt;
-
-	/* Attribute pointer to be announced.  */
-	struct attr *attr;
-};
-
 struct bgp_advertise {
 	/* FIFO for advertisement.  */
 	struct bgp_adv_fifo_item fifo;
 
-	/* Link list for same attribute advertise.  */
-	struct bgp_advertise *next;
-	struct bgp_advertise *prev;
+	/* FIFO for this item in the bgp_advertise_attr fifo */
+	struct bgp_advertise_attr_fifo_item item;
 
 	/* Prefix information.  */
-	struct bgp_node *rn;
+	struct bgp_dest *dest;
 
 	/* Reference pointer.  */
 	struct bgp_adj_out *adj;
@@ -60,7 +38,20 @@ struct bgp_advertise {
 	struct bgp_path_info *pathi;
 };
 
-DECLARE_LIST(bgp_adv_fifo, struct bgp_advertise, fifo)
+DECLARE_DLIST(bgp_advertise_attr_fifo, struct bgp_advertise, item);
+DECLARE_DLIST(bgp_adv_fifo, struct bgp_advertise, fifo);
+
+/* BGP advertise attribute.  */
+struct bgp_advertise_attr {
+	/* Head of advertisement pointer. */
+	struct bgp_advertise_attr_fifo_head fifo;
+
+	/* Reference counter.  */
+	unsigned long refcnt;
+
+	/* Attribute pointer to be announced.  */
+	struct attr *attr;
+};
 
 /* BGP adjacency out.  */
 struct bgp_adj_out {
@@ -74,12 +65,18 @@ struct bgp_adj_out {
 	TAILQ_ENTRY(bgp_adj_out) subgrp_adj_train;
 
 	/* Prefix information.  */
-	struct bgp_node *rn;
+	struct bgp_dest *dest;
 
 	uint32_t addpath_tx_id;
 
+	/* Attribute hash */
+	uint32_t attr_hash;
+
 	/* Advertised attribute.  */
 	struct attr *attr;
+
+	/* VPN label information */
+	struct bgp_labels *labels;
 
 	/* Advertisement information.  */
 	struct bgp_advertise *adv;
@@ -101,6 +98,12 @@ struct bgp_adj_in {
 	/* Received attribute.  */
 	struct attr *attr;
 
+	/* VPN label information */
+	struct bgp_labels *labels;
+
+	/* timestamp (monotime) */
+	time_t uptime;
+
 	/* Addpath identifier */
 	uint32_t addpath_rx_id;
 };
@@ -109,7 +112,6 @@ struct bgp_adj_in {
 struct bgp_synchronize {
 	struct bgp_adv_fifo_head update;
 	struct bgp_adv_fifo_head withdraw;
-	struct bgp_adv_fifo_head withdraw_low;
 };
 
 /* BGP adjacency linked list.  */
@@ -136,26 +138,28 @@ struct bgp_synchronize {
 #define BGP_ADJ_IN_DEL(N, A) BGP_PATH_INFO_DEL(N, A, adj_in)
 
 /* Prototypes.  */
-extern int bgp_adj_out_lookup(struct peer *, struct bgp_node *, uint32_t);
-extern void bgp_adj_in_set(struct bgp_node *, struct peer *, struct attr *,
-			   uint32_t);
-extern int bgp_adj_in_unset(struct bgp_node *, struct peer *, uint32_t);
-extern void bgp_adj_in_remove(struct bgp_node *, struct bgp_adj_in *);
+extern bool bgp_adj_out_lookup(struct peer *peer, struct bgp_dest *dest,
+			       uint32_t addpath_tx_id);
+extern void bgp_adj_in_set(struct bgp_dest *dest, struct peer *peer,
+			   struct attr *attr, uint32_t addpath_id,
+			   struct bgp_labels *labels);
+extern bool bgp_adj_in_unset(struct bgp_dest **dest, struct peer *peer,
+			     uint32_t addpath_id);
+extern void bgp_adj_in_remove(struct bgp_dest **dest, struct bgp_adj_in *bai);
 
-extern void bgp_sync_init(struct peer *);
-extern void bgp_sync_delete(struct peer *);
-extern unsigned int baa_hash_key(void *p);
-extern bool baa_hash_cmp(const void *p1, const void *p2);
+extern unsigned int bgp_advertise_attr_hash_key(const void *p);
+extern bool bgp_advertise_attr_hash_cmp(const void *p1, const void *p2);
 extern void bgp_advertise_add(struct bgp_advertise_attr *baa,
 			      struct bgp_advertise *adv);
 extern struct bgp_advertise *bgp_advertise_new(void);
 extern void bgp_advertise_free(struct bgp_advertise *adv);
-extern struct bgp_advertise_attr *bgp_advertise_intern(struct hash *hash,
-						       struct attr *attr);
-extern struct bgp_advertise_attr *baa_new(void);
+extern struct bgp_advertise_attr *bgp_advertise_attr_intern(struct hash *hash,
+							    struct attr *attr);
+extern struct bgp_advertise_attr *bgp_advertise_attr_new(void);
 extern void bgp_advertise_delete(struct bgp_advertise_attr *baa,
 				 struct bgp_advertise *adv);
-extern void bgp_advertise_unintern(struct hash *hash,
-				   struct bgp_advertise_attr *baa);
+extern void bgp_advertise_attr_unintern(struct hash *hash,
+					struct bgp_advertise_attr *baa);
+extern void bgp_advertise_attr_free(struct bgp_advertise_attr *baa);
 
 #endif /* _QUAGGA_BGP_ADVERTISE_H */

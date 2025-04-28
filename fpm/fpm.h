@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: ISC OR GPL-2.0-or-later
 /*
  * Public definitions pertaining to the Forwarding Plane Manager component.
  *
@@ -16,38 +17,7 @@
 
 /*
  * License Option 1: GPL
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful,but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; if not, write to the Free Software Foundation, Inc.,
- * 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- */
-
-/*
  * License Option 2: ISC License
- *
- * Permission to use, copy, modify, and/or distribute this software
- * for any purpose with or without fee is hereby granted, provided
- * that the above copyright notice and this permission notice appear
- * in all copies.
- *
- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL
- * WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED
- * WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE
- * AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR
- * CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS
- * OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
- * NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
- * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #ifndef _FPM_H
@@ -93,14 +63,9 @@
 #define FPM_DEFAULT_IP              (htonl (INADDR_LOOPBACK))
 
 /*
- * default port for fpm connections
- */
-#define FPM_DEFAULT_PORT 2620
-
-/*
  * Largest message that can be sent to or received from the FPM.
  */
-#define FPM_MAX_MSG_LEN 4096
+#define FPM_MAX_MSG_LEN MAX(MULTIPATH_NUM * 32, 4096)
 
 #ifdef __SUNPRO_C
 #pragma pack(1)
@@ -175,7 +140,7 @@ static inline size_t fpm_msg_align(size_t len)
  * The (rounded up) size of the FPM message header. This ensures that
  * the message payload always starts at an aligned address.
  */
-#define FPM_MSG_HDR_LEN (sizeof (fpm_msg_hdr_t))
+#define FPM_MSG_HDR_LEN (sizeof(fpm_msg_hdr_t))
 
 #ifndef COMPILE_ASSERT
 #define COMPILE_ASSERT(x) extern int __dummy[2 * !!(x) - 1]
@@ -245,7 +210,7 @@ static inline fpm_msg_hdr_t *fpm_msg_next(fpm_msg_hdr_t *hdr, size_t *len)
 /*
  * fpm_msg_hdr_ok
  *
- * Returns TRUE if a message header looks well-formed.
+ * Returns true if a message header looks well-formed.
  */
 static inline int fpm_msg_hdr_ok(const fpm_msg_hdr_t *hdr)
 {
@@ -272,7 +237,7 @@ static inline int fpm_msg_hdr_ok(const fpm_msg_hdr_t *hdr)
 /*
  * fpm_msg_ok
  *
- * Returns TRUE if a message looks well-formed.
+ * Returns true if a message looks well-formed.
  *
  * @param len The length in bytes from 'hdr' to the end of the buffer.
  */

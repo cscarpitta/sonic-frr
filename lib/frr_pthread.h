@@ -1,20 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Utilities and interfaces for managing POSIX threads within FRR.
  * Copyright (C) 2017  Cumulus Networks, Inc.
- *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #ifndef _FRR_PTHREAD_H
@@ -23,14 +10,12 @@
 #include <pthread.h>
 #include "frratomic.h"
 #include "memory.h"
-#include "thread.h"
+#include "frrcu.h"
+#include "frrevent.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-DECLARE_MTYPE(FRR_PTHREAD);
-DECLARE_MTYPE(PTHREAD_PRIM);
 
 #define OS_THREAD_NAMELEN 16
 
@@ -53,11 +38,24 @@ struct frr_pthread {
 	/* pthread id */
 	pthread_t thread;
 
+	struct rcu_thread *rcu_thread;
+
 	/* thread master for this pthread's thread.c event loop */
-	struct thread_master *master;
+	struct event_loop *master;
 
 	/* caller-specified data; start & stop funcs, name, id */
 	struct frr_pthread_attr attr;
+
+	/*
+	 * Startup serialization: newly-started pthreads wait at a point
+	 * very early in life so that there isn't a race with the
+	 * starting pthread. The OS 'start' apis don't make any guarantees
+	 * about which pthread runs first - the existing pthread that has
+	 * called the 'start' api, or the new pthread that is just starting.
+	 */
+	pthread_cond_t startup_cond;
+	pthread_mutex_t startup_cond_mtx;
+	atomic_bool started;
 
 	/*
 	 * Notification mechanism for allowing pthreads to notify their parents
@@ -99,7 +97,7 @@ struct frr_pthread {
 	char os_name[OS_THREAD_NAMELEN];
 };
 
-extern struct frr_pthread_attr frr_pthread_attr_default;
+extern const struct frr_pthread_attr frr_pthread_attr_default;
 
 /*
  * Initializes this module.
@@ -133,7 +131,7 @@ void frr_pthread_finish(void);
  * @param os_name - 16 characters (including '\0') thread name to set in os,
  * @return the created frr_pthread upon success, or NULL upon failure
  */
-struct frr_pthread *frr_pthread_new(struct frr_pthread_attr *attr,
+struct frr_pthread *frr_pthread_new(const struct frr_pthread_attr *attr,
 				    const char *name, const char *os_name);
 
 /*
@@ -214,6 +212,57 @@ void frr_pthread_stop_all(void);
 #ifndef HAVE_PTHREAD_CONDATTR_SETCLOCK
 #define pthread_condattr_setclock(A, B)
 #endif
+
+int frr_pthread_non_controlled_startup(pthread_t thread, const char *name,
+				       const char *os_name);
+
+/* mutex auto-lock/unlock */
+
+/* variant 1:
+ * (for short blocks, multiple mutexes supported)
+ * break & return can be used for aborting the block
+ *
+ * frr_with_mutex(&mtx, &mtx2) {
+ *    if (error)
+ *       break;
+ *    ...
+ * }
+ */
+#define _frr_with_mutex(mutex)                                                 \
+	*NAMECTR(_mtx_) __attribute__((                                        \
+		unused, cleanup(_frr_mtx_unlock))) = _frr_mtx_lock(mutex),     \
+	/* end */
+
+#define frr_with_mutex(...)                                                    \
+	for (pthread_mutex_t MACRO_REPEAT(_frr_with_mutex, ##__VA_ARGS__)      \
+	     *_once = NULL; _once == NULL; _once = (void *)1)                  \
+	/* end */
+
+/* variant 2:
+ * (more suitable for long blocks, no extra indentation)
+ *
+ * frr_mutex_lock_autounlock(&mtx);
+ * ...
+ */
+#define frr_mutex_lock_autounlock(mutex)                                       \
+	pthread_mutex_t *NAMECTR(_mtx_)                                        \
+		__attribute__((unused, cleanup(_frr_mtx_unlock))) =            \
+				    _frr_mtx_lock(mutex)                       \
+	/* end */
+
+static inline pthread_mutex_t *_frr_mtx_lock(pthread_mutex_t *mutex)
+{
+	pthread_mutex_lock(mutex);
+	return mutex;
+}
+
+static inline void _frr_mtx_unlock(pthread_mutex_t **mutex)
+{
+	if (!*mutex)
+		return;
+	pthread_mutex_unlock(*mutex);
+	*mutex = NULL;
+}
 
 #ifdef __cplusplus
 }

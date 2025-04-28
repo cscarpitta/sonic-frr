@@ -1,28 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * This file is part of Quagga.
- *
- * Quagga is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * Quagga is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
+#include <sys/stat.h>
 
 #include <lib/version.h>
 #include "getopt.h"
 #include "privs.h"
 #include "memory.h"
-#include "memory_vty.h"
+#include "lib_vty.h"
 
 zebra_capabilities_t _caps_p[] = {
 	ZCAP_NET_RAW, ZCAP_BIND, ZCAP_NET_ADMIN, ZCAP_DAC_OVERRIDE,
@@ -64,7 +51,7 @@ Report bugs to %s\n",
 	exit(status);
 }
 
-struct thread_master *master;
+struct event_loop *master;
 /* main routine. */
 int main(int argc, char **argv)
 {
@@ -105,7 +92,7 @@ int main(int argc, char **argv)
 	}
 
 	/* Library inits. */
-	memory_init();
+	lib_cmd_init();
 	zprivs_preinit(&test_privs);
 	zprivs_init(&test_privs);
 
@@ -113,7 +100,7 @@ int main(int argc, char **argv)
 	((test_privs.current_state() == ZPRIVS_RAISED) ? "Raised" : "Lowered")
 
 	printf("%s\n", PRIV_STATE());
-	frr_elevate_privs(&test_privs) {
+	frr_with_privs(&test_privs) {
 		printf("%s\n", PRIV_STATE());
 	}
 
@@ -125,7 +112,7 @@ int main(int argc, char **argv)
 
 	/* but these should continue to work... */
 	printf("%s\n", PRIV_STATE());
-	frr_elevate_privs(&test_privs) {
+	frr_with_privs(&test_privs) {
 		printf("%s\n", PRIV_STATE());
 	}
 

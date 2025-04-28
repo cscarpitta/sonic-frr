@@ -1,25 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * BGP Peer Attribute Unit Tests
  * Copyright (C) 2018  Pascal Mathis
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 #include <zebra.h>
 
+#include "debug.h"
 #include "memory.h"
 #include "plist.h"
+#include "printfrr.h"
 #include "bgpd/bgpd.h"
 #include "bgpd/bgp_attr.h"
 #include "bgpd/bgp_regex.h"
@@ -29,6 +18,8 @@
 #include "bgpd/bgp_route.h"
 #include "bgpd/bgp_vty.h"
 #include "bgpd/bgp_zebra.h"
+#include "bgpd/bgp_network.h"
+#include "bgpd/bgp_label.h"
 
 #ifdef ENABLE_BGP_VNC
 #include "bgpd/rfapi/rfapi_backend.h"
@@ -43,8 +34,9 @@
 		if ((T)->state != TEST_SUCCESS || (C))                         \
 			break;                                                 \
 		(T)->state = TEST_ASSERT_ERROR;                                \
-		(T)->error = str_printf("assertion failed: %s (%s:%d)", (#C),  \
-					__FILE__, __LINE__);                   \
+		(T)->error =                                                   \
+			asprintfrr(MTYPE_TMP, "assertion failed: %s (%s:%d)",  \
+				   (#C), __FILE__, __LINE__);                  \
 	} while (0)
 
 #define TEST_ASSERT_EQ(T, A, B)                                                \
@@ -52,9 +44,11 @@
 		if ((T)->state != TEST_SUCCESS || ((A) == (B)))                \
 			break;                                                 \
 		(T)->state = TEST_ASSERT_ERROR;                                \
-		(T)->error = str_printf(                                       \
-			"assertion failed: %s[%d] == [%d]%s (%s:%d)", (#A),    \
-			(A), (B), (#B), __FILE__, __LINE__);                   \
+		(T)->error = asprintfrr(                                       \
+			MTYPE_TMP,                                             \
+			"assertion failed: %s[%lld] == [%lld]%s (%s:%d)",      \
+			(#A), (long long)(A), (long long)(B), (#B), __FILE__,  \
+			__LINE__);                                             \
 	} while (0)
 
 #define TEST_HANDLER_MAX 5
@@ -114,7 +108,7 @@
 
 /* Required variables to link in libbgp */
 struct zebra_privs_t bgpd_privs = {0};
-struct thread_master *master;
+struct event_loop *master;
 
 enum test_state {
 	TEST_SUCCESS,
@@ -171,9 +165,9 @@ struct test_peer_attr {
 
 	enum test_peer_attr_type type;
 	union {
-		uint32_t flag;
+		uint64_t flag;
 		struct {
-			uint32_t flag;
+			uint64_t flag;
 			size_t direct;
 		} filter;
 	} u;
@@ -210,44 +204,6 @@ static struct test_peer_family test_default_families[] = {
 	{.afi = AFI_IP6, .safi = SAFI_UNICAST},
 	{.afi = AFI_IP6, .safi = SAFI_MULTICAST},
 };
-
-static char *str_vprintf(const char *fmt, va_list ap)
-{
-	int ret;
-	int buf_size = 0;
-	char *buf = NULL;
-	va_list apc;
-
-	while (1) {
-		va_copy(apc, ap);
-		ret = vsnprintf(buf, buf_size, fmt, apc);
-		va_end(apc);
-
-		if (ret >= 0 && ret < buf_size)
-			break;
-
-		if (ret >= 0)
-			buf_size = ret + 1;
-		else
-			buf_size *= 2;
-
-		buf = XREALLOC(MTYPE_TMP, buf, buf_size);
-	}
-
-	return buf;
-}
-
-static char *str_printf(const char *fmt, ...)
-{
-	char *buf;
-	va_list ap;
-
-	va_start(ap, fmt);
-	buf = str_vprintf(fmt, ap);
-	va_end(ap);
-
-	return buf;
-}
 
 TEST_ATTR_HANDLER_DECL(advertisement_interval, v_routeadv, 10, 20);
 TEST_STR_ATTR_HANDLER_DECL(password, password, "FRR-Peer", "FRR-Group");
@@ -308,11 +264,9 @@ static struct test_peer_attr test_peer_attrs[] = {
 		.type = PEER_AT_GLOBAL_FLAG,
 	},
 	{
-		.cmd = "capability extended-nexthop",
-		.u.flag = PEER_FLAG_CAPABILITY_ENHE,
+		.cmd = "capability software-version",
+		.u.flag = PEER_FLAG_CAPABILITY_SOFT_VERSION,
 		.type = PEER_AT_GLOBAL_FLAG,
-		.o.invert_peer = true,
-		.o.use_iface_peer = true,
 	},
 	{
 		.cmd = "description",
@@ -331,9 +285,11 @@ static struct test_peer_attr test_peer_attrs[] = {
 		.type = PEER_AT_GLOBAL_FLAG,
 	},
 	{
-		.cmd = "enforce-first-as",
-		.u.flag = PEER_FLAG_ENFORCE_FIRST_AS,
+		.cmd = "capability fqdn",
+		.u.flag = PEER_FLAG_CAPABILITY_FQDN,
 		.type = PEER_AT_GLOBAL_FLAG,
+		.o.invert_peer = true,
+		.o.invert_group = true,
 	},
 	{
 		.cmd = "local-as",
@@ -673,6 +629,14 @@ static struct test_peer_attr test_peer_attrs[] = {
 		.u.flag = PEER_FLAG_WEIGHT,
 		.handlers[0] = TEST_HANDLER(weight),
 	},
+	{
+		.cmd = "accept-own",
+		.peer_cmd = "accept-own",
+		.group_cmd = "accept-own",
+		.families[0] = {.afi = AFI_IP, .safi = SAFI_MPLS_VPN},
+		.families[1] = {.afi = AFI_IP6, .safi = SAFI_MPLS_VPN},
+		.u.flag = PEER_FLAG_ACCEPT_OWN,
+	},
 	{NULL}
 };
 /* clang-format on */
@@ -684,21 +648,14 @@ static const char *str_from_afi(afi_t afi)
 		return "ipv4";
 	case AFI_IP6:
 		return "ipv6";
-	default:
-		return "<unknown AFI>";
+	case AFI_L2VPN:
+		return "l2vpn";
+	case AFI_MAX:
+	case AFI_UNSPEC:
+		return "bad-value";
 	}
-}
 
-static const char *str_from_safi(safi_t safi)
-{
-	switch (safi) {
-	case SAFI_UNICAST:
-		return "unicast";
-	case SAFI_MULTICAST:
-		return "multicast";
-	default:
-		return "<unknown SAFI>";
-	}
+	assert(!"Reached end of function we should never reach");
 }
 
 static const char *str_from_attr_type(enum test_peer_attr_type at)
@@ -723,6 +680,7 @@ static bool is_attr_type_global(enum test_peer_attr_type at)
 	return at == PEER_AT_GLOBAL_FLAG || at == PEER_AT_GLOBAL_CUSTOM;
 }
 
+PRINTFRR(2, 3)
 static void test_log(struct test *test, const char *fmt, ...)
 {
 	va_list ap;
@@ -733,10 +691,11 @@ static void test_log(struct test *test, const char *fmt, ...)
 
 	/* Store formatted log message. */
 	va_start(ap, fmt);
-	listnode_add(test->log, str_vprintf(fmt, ap));
+	listnode_add(test->log, vasprintfrr(MTYPE_TMP, fmt, ap));
 	va_end(ap);
 }
 
+PRINTFRR(2, 3)
 static void test_execute(struct test *test, const char *fmt, ...)
 {
 	int ret;
@@ -750,12 +709,12 @@ static void test_execute(struct test *test, const char *fmt, ...)
 
 	/* Format command string with variadic arguments. */
 	va_start(ap, fmt);
-	cmd = str_vprintf(fmt, ap);
+	cmd = vasprintfrr(MTYPE_TMP, fmt, ap);
 	va_end(ap);
 	if (!cmd) {
 		test->state = TEST_INTERNAL_ERROR;
-		test->error =
-			str_printf("could not format command string [%s]", fmt);
+		test->error = asprintfrr(
+			MTYPE_TMP, "could not format command string [%s]", fmt);
 		return;
 	}
 
@@ -763,7 +722,8 @@ static void test_execute(struct test *test, const char *fmt, ...)
 	vline = cmd_make_strvec(cmd);
 	if (vline == NULL) {
 		test->state = TEST_INTERNAL_ERROR;
-		test->error = str_printf(
+		test->error = asprintfrr(
+			MTYPE_TMP,
 			"tokenizing command string [%s] returned empty result",
 			cmd);
 		XFREE(MTYPE_TMP, cmd);
@@ -775,7 +735,8 @@ static void test_execute(struct test *test, const char *fmt, ...)
 	ret = cmd_execute_command(vline, test->vty, NULL, 0);
 	if (ret != CMD_SUCCESS) {
 		test->state = TEST_COMMAND_ERROR;
-		test->error = str_printf(
+		test->error = asprintfrr(
+			MTYPE_TMP,
 			"execution of command [%s] has failed with code [%d]",
 			cmd, ret);
 	}
@@ -785,6 +746,7 @@ static void test_execute(struct test *test, const char *fmt, ...)
 	XFREE(MTYPE_TMP, cmd);
 }
 
+PRINTFRR(2, 0)
 static void test_config(struct test *test, const char *fmt, bool invert,
 			va_list ap)
 {
@@ -799,12 +761,12 @@ static void test_config(struct test *test, const char *fmt, bool invert,
 
 	/* Format matcher string with variadic arguments. */
 	va_copy(apc, ap);
-	matcher = str_vprintf(fmt, apc);
+	matcher = vasprintfrr(MTYPE_TMP, fmt, apc);
 	va_end(apc);
 	if (!matcher) {
 		test->state = TEST_INTERNAL_ERROR;
-		test->error =
-			str_printf("could not format matcher string [%s]", fmt);
+		test->error = asprintfrr(
+			MTYPE_TMP, "could not format matcher string [%s]", fmt);
 		return;
 	}
 
@@ -817,11 +779,13 @@ static void test_config(struct test *test, const char *fmt, bool invert,
 	matched = !!strstr(config, matcher);
 	if (!matched && !invert) {
 		test->state = TEST_CONFIG_ERROR;
-		test->error = str_printf("expected config [%s] to be present",
+		test->error = asprintfrr(MTYPE_TMP,
+					 "expected config [%s] to be present",
 					 matcher);
 	} else if (matched && invert) {
 		test->state = TEST_CONFIG_ERROR;
-		test->error = str_printf("expected config [%s] to be absent",
+		test->error = asprintfrr(MTYPE_TMP,
+					 "expected config [%s] to be absent",
 					 matcher);
 	}
 
@@ -830,6 +794,7 @@ static void test_config(struct test *test, const char *fmt, bool invert,
 	XFREE(MTYPE_TMP, config);
 }
 
+PRINTFRR(2, 3)
 static void test_config_present(struct test *test, const char *fmt, ...)
 {
 	va_list ap;
@@ -839,6 +804,7 @@ static void test_config_present(struct test *test, const char *fmt, ...)
 	va_end(ap);
 }
 
+PRINTFRR(2, 3)
 static void test_config_absent(struct test *test, const char *fmt, ...)
 {
 	va_list ap;
@@ -885,8 +851,8 @@ static void test_initialize(struct test *test)
 	test->bgp = bgp_get_default();
 	if (!test->bgp) {
 		test->state = TEST_INTERNAL_ERROR;
-		test->error =
-			str_printf("could not retrieve default bgp instance");
+		test->error = asprintfrr(
+			MTYPE_TMP, "could not retrieve default bgp instance");
 		return;
 	}
 
@@ -900,7 +866,8 @@ static void test_initialize(struct test *test)
 	}
 	if (!test->peer) {
 		test->state = TEST_INTERNAL_ERROR;
-		test->error = str_printf(
+		test->error = asprintfrr(
+			MTYPE_TMP,
 			"could not retrieve instance of bgp peer [%s]",
 			cfg.peer_address);
 		return;
@@ -910,7 +877,8 @@ static void test_initialize(struct test *test)
 	test->group = peer_group_lookup(test->bgp, cfg.peer_group);
 	if (!test->group) {
 		test->state = TEST_INTERNAL_ERROR;
-		test->error = str_printf(
+		test->error = asprintfrr(
+			MTYPE_TMP,
 			"could not retrieve instance of bgp peer-group [%s]",
 			cfg.peer_group);
 		return;
@@ -1080,7 +1048,8 @@ static void test_custom(struct test *test, struct test_peer_attr *pa,
 		if (test->state != TEST_SUCCESS) {
 			test->state = TEST_CUSTOM_ERROR;
 			handler_error = test->error;
-			test->error = str_printf("custom handler failed: %s",
+			test->error = asprintfrr(MTYPE_TMP,
+						 "custom handler failed: %s",
 						 handler_error);
 			XFREE(MTYPE_TMP, handler_error);
 		}
@@ -1122,8 +1091,8 @@ static void test_process(struct test *test, struct test_peer_attr *pa,
 
 	default:
 		test->state = TEST_INTERNAL_ERROR;
-		test->error =
-			str_printf("invalid attribute type: %d", pa->type);
+		test->error = asprintfrr(
+			MTYPE_TMP, "invalid attribute type: %d", pa->type);
 		break;
 	}
 
@@ -1148,8 +1117,8 @@ static void test_peer_attr(struct test *test, struct test_peer_attr *pa)
 	type = str_from_attr_type(pa->type);
 	if (!type) {
 		test->state = TEST_INTERNAL_ERROR;
-		test->error =
-			str_printf("invalid attribute type: %d", pa->type);
+		test->error = asprintfrr(
+			MTYPE_TMP, "invalid attribute type: %d", pa->type);
 		return;
 	}
 
@@ -1170,9 +1139,9 @@ static void test_peer_attr(struct test *test, struct test_peer_attr *pa)
 	/* Test Preparation: Switch and activate address-family. */
 	if (!is_attr_type_global(pa->type)) {
 		test_log(test, "prepare: switch address-family to [%s]",
-			 afi_safi_print(pa->afi, pa->safi));
+			 get_afi_safi_str(pa->afi, pa->safi, false));
 		test_execute(test, "address-family %s %s",
-			     str_from_afi(pa->afi), str_from_safi(pa->safi));
+			     str_from_afi(pa->afi), safi2str(pa->safi));
 		test_execute(test, "neighbor %s activate", g->name);
 		test_execute(test, "neighbor %s activate", p->host);
 	}
@@ -1237,9 +1206,9 @@ static void test_peer_attr(struct test *test, struct test_peer_attr *pa)
 	/* Test Preparation: Switch and activate address-family. */
 	if (!is_attr_type_global(pa->type)) {
 		test_log(test, "prepare: switch address-family to [%s]",
-			 afi_safi_print(pa->afi, pa->safi));
+			 get_afi_safi_str(pa->afi, pa->safi, false));
 		test_execute(test, "address-family %s %s",
-			     str_from_afi(pa->afi), str_from_safi(pa->safi));
+			     str_from_afi(pa->afi), safi2str(pa->safi));
 		test_execute(test, "neighbor %s activate", g->name);
 		test_execute(test, "neighbor %s activate", p->host);
 	}
@@ -1285,9 +1254,9 @@ static void test_peer_attr(struct test *test, struct test_peer_attr *pa)
 	/* Test Preparation: Switch and activate address-family. */
 	if (!is_attr_type_global(pa->type)) {
 		test_log(test, "prepare: switch address-family to [%s]",
-			 afi_safi_print(pa->afi, pa->safi));
+			 get_afi_safi_str(pa->afi, pa->safi, false));
 		test_execute(test, "address-family %s %s",
-			     str_from_afi(pa->afi), str_from_safi(pa->safi));
+			     str_from_afi(pa->afi), safi2str(pa->safi));
 		test_execute(test, "neighbor %s activate", g->name);
 		test_execute(test, "neighbor %s activate", p->host);
 	}
@@ -1380,17 +1349,17 @@ static void test_peer_attr(struct test *test, struct test_peer_attr *pa)
 static void bgp_startup(void)
 {
 	cmd_init(1);
-	openzlog("testbgpd", "NONE", 0, LOG_CONS | LOG_NDELAY | LOG_PID,
-		 LOG_DAEMON);
+	debug_init();
+	zlog_aux_init("NONE: ", LOG_DEBUG);
 	zprivs_preinit(&bgpd_privs);
 	zprivs_init(&bgpd_privs);
 
-	master = thread_master_create(NULL);
-	yang_init();
-	nb_init(master, NULL, 0);
-	bgp_master_init(master);
+	master = event_master_create(NULL);
+	nb_init(master, NULL, 0, false, false);
+	bgp_master_init(master, BGP_SOCKET_SNDBUF_SIZE, list_new());
 	bgp_option_set(BGP_OPT_NO_LISTEN);
-	vrf_init(NULL, NULL, NULL, NULL, NULL);
+	vrf_init(NULL, NULL, NULL, NULL);
+	frr_pthread_init();
 	bgp_init(0);
 	bgp_pthreads_run();
 }
@@ -1408,6 +1377,7 @@ static void bgp_shutdown(void)
 	bgp_route_finish();
 	bgp_route_map_terminate();
 	bgp_attr_finish();
+	bgp_labels_finish();
 	bgp_pthreads_finish();
 	access_list_add_hook(NULL);
 	access_list_delete_hook(NULL);
@@ -1434,9 +1404,8 @@ static void bgp_shutdown(void)
 	nb_terminate();
 	yang_terminate();
 	zprivs_terminate(&bgpd_privs);
-	thread_master_free(master);
+	event_master_free(master);
 	master = NULL;
-	closezlog();
 }
 
 int main(void)
@@ -1486,11 +1455,11 @@ int main(void)
 
 		/* Build test description string. */
 		if (pa->afi && pa->safi)
-			desc = str_printf("peer\\%s-%s\\%s",
+			desc = asprintfrr(MTYPE_TMP, "peer\\%s-%s\\%s",
 					  str_from_afi(pa->afi),
-					  str_from_safi(pa->safi), pa->cmd);
+					  safi2str(pa->safi), pa->cmd);
 		else
-			desc = str_printf("peer\\%s", pa->cmd);
+			desc = asprintfrr(MTYPE_TMP, "peer\\%s", pa->cmd);
 
 		/* Initialize new test instance. */
 		test = test_new(desc, pa->o.use_ibgp, pa->o.use_iface_peer);

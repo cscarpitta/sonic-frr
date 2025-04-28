@@ -23,7 +23,8 @@ Add packages:
 ::
 
     sudo pkg_add git autoconf automake libtool gmake openssl \
-       pkg-config json-c python27 py27-test python35 py-sphinx
+       pkg-config json-c py36-test python36 py36-sphinx \
+       protobuf-c
 
 Install SSL Root Certificates (for git https access):
 
@@ -32,13 +33,6 @@ Install SSL Root Certificates (for git https access):
     sudo pkg_add mozilla-rootcerts
     sudo touch /etc/openssl/openssl.cnf
     sudo mozilla-rootcerts install
-
-Select default Python and py.test
-
-::
-
-    sudo ln -s /usr/pkg/bin/python2.7 /usr/bin/python
-    sudo ln -s /usr/pkg/bin/py.test-2.7 /usr/bin/py.test
 
 .. include:: building-libyang.rst
 
@@ -70,10 +64,9 @@ an example)
     export LDFLAGS="-L/usr/pkg/lib -R/usr/pkg/lib"
     export CPPFLAGS="-I/usr/pkg/include"
     ./configure \
-        --sysconfdir=/usr/pkg/etc/frr \
-        --enable-exampledir=/usr/pkg/share/examples/frr \
+        --sysconfdir=/usr/pkg/etc \
+        --localstatedir=/var \
         --enable-pkgsrcrcdir=/usr/pkg/share/examples/rc.d \
-        --localstatedir=/var/run/frr \
         --enable-multipath=64 \
         --enable-user=frr \
         --enable-group=frr \

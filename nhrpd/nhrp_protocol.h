@@ -1,9 +1,7 @@
+// SPDX-License-Identifier: MIT
 /* nhrp_protocol.h - NHRP protocol definitions
  *
  * Copyright (c) 2007-2012 Timo Teräs <timo.teras@iki.fi>
- *
- * This software is licensed under the MIT License.
- * See MIT-LICENSE.txt for additional details.
  */
 
 #ifndef NHRP_PROTOCOL_H
@@ -75,6 +73,7 @@
 
 /* NHRP Authentication extension types (ala Cisco) */
 #define NHRP_AUTHENTICATION_PLAINTEXT		0x00000001
+#define NHRP_CISCO_PASS_LEN			8
 
 /* NHRP Packet Structures */
 struct nhrp_packet_header {

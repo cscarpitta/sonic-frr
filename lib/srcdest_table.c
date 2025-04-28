@@ -1,24 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * SRC-DEST Routing Table
  *
  * Copyright (C) 2017 by David Lamparter & Christian Franke,
  *                       Open Source Routing / NetDEF Inc.
  *
- * This file is part of FreeRangeRouting (FRR)
- *
- * FRR is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * FRR is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
+ * This file is part of FRRouting (FRR)
  */
 
 #include <zebra.h>
@@ -28,8 +15,9 @@
 #include "memory.h"
 #include "prefix.h"
 #include "table.h"
+#include "printfrr.h"
 
-DEFINE_MTYPE_STATIC(LIB, ROUTE_SRC_NODE, "Route source node")
+DEFINE_MTYPE_STATIC(LIB, ROUTE_SRC_NODE, "Route source node");
 
 /* ----- functions to manage rnodes _with_ srcdest table ----- */
 struct srcdest_rnode {
@@ -264,7 +252,8 @@ struct route_node *srcdest_rnode_lookup(struct route_table *table,
 	return srn;
 }
 
-void srcdest_rnode_prefixes(struct route_node *rn, const struct prefix **p,
+void srcdest_rnode_prefixes(const struct route_node *rn,
+			    const struct prefix **p,
 			    const struct prefix **src_p)
 {
 	if (rnode_is_srcnode(rn)) {
@@ -296,10 +285,27 @@ const char *srcdest2str(const struct prefix *dst_p,
 	return str;
 }
 
-const char *srcdest_rnode2str(struct route_node *rn, char *str, int size)
+const char *srcdest_rnode2str(const struct route_node *rn, char *str, int size)
 {
 	const struct prefix *dst_p, *src_p;
 
 	srcdest_rnode_prefixes(rn, &dst_p, &src_p);
 	return srcdest2str(dst_p, (const struct prefix_ipv6 *)src_p, str, size);
+}
+
+printfrr_ext_autoreg_p("RN", printfrr_rn);
+static ssize_t printfrr_rn(struct fbuf *buf, struct printfrr_eargs *ea,
+			   const void *ptr)
+{
+	const struct route_node *rn = ptr;
+	const struct prefix *dst_p, *src_p;
+	char cbuf[PREFIX_STRLEN * 2 + 6];
+
+	if (!rn)
+		return bputs(buf, "(null)");
+
+	srcdest_rnode_prefixes(rn, &dst_p, &src_p);
+	srcdest2str(dst_p, (const struct prefix_ipv6 *)src_p,
+		    cbuf, sizeof(cbuf));
+	return bputs(buf, cbuf);
 }

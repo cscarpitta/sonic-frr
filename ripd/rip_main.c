@@ -1,31 +1,15 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* RIPd main routine.
  * Copyright (C) 1997, 98 Kunihiro Ishiguro <kunihiro@zebra.org>
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
 
 #include <lib/version.h>
 #include "getopt.h"
-#include "thread.h"
+#include "frrevent.h"
 #include "command.h"
 #include "memory.h"
-#include "memory_vty.h"
 #include "prefix.h"
 #include "filter.h"
 #include "keychain.h"
@@ -36,18 +20,23 @@
 #include "vrf.h"
 #include "if_rmap.h"
 #include "libfrr.h"
+#include "routemap.h"
+#include "bfd.h"
+#include "mgmt_be_client.h"
+#include "libagentx.h"
 
 #include "ripd/ripd.h"
+#include "ripd/rip_bfd.h"
+#include "ripd/rip_nb.h"
 #include "ripd/rip_errors.h"
 
 /* ripd options. */
-#if CONFDATE > 20190521
-	CPP_NOTICE("-r / --retain has reached deprecation EOL, remove")
-#endif
-static struct option longopts[] = {{"retain", no_argument, NULL, 'r'}, {0}};
+static struct option longopts[] = {{0}};
 
 /* ripd privileges */
 zebra_capabilities_t _caps_p[] = {ZCAP_NET_RAW, ZCAP_BIND, ZCAP_SYS_ADMIN};
+
+uint32_t zebra_ecmp_count = MULTIPATH_NUM;
 
 struct zebra_privs_t ripd_privs = {
 #if defined(FRR_USER)
@@ -64,7 +53,9 @@ struct zebra_privs_t ripd_privs = {
 	.cap_num_i = 0};
 
 /* Master of threads. */
-struct thread_master *master;
+struct event_loop *master;
+
+struct mgmt_be_client *mgmt_be_client;
 
 static struct frr_daemon_info ripd_di;
 
@@ -80,11 +71,31 @@ static void sighup(void)
 /* SIGINT handler. */
 static void sigint(void)
 {
+	struct vrf *vrf;
+
 	zlog_notice("Terminating on signal");
+
+	bfd_protocol_integration_set_shutdown(true);
+
+
+	nb_oper_cancel_all_walks();
+	mgmt_be_client_destroy(mgmt_be_client);
+	mgmt_be_client = NULL;
+
+	RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
+		if (!vrf->info)
+			continue;
+
+		rip_clean(vrf->info);
+	}
 
 	rip_vrf_terminate();
 	if_rmap_terminate();
 	rip_zclient_stop();
+
+	route_map_finish();
+
+	keychain_terminate();
 	frr_fini();
 
 	exit(0);
@@ -96,7 +107,7 @@ static void sigusr1(void)
 	zlog_rotate();
 }
 
-static struct quagga_signal_t ripd_signals[] = {
+static struct frr_signal_t ripd_signals[] = {
 	{
 		.signal = SIGHUP,
 		.handler = &sighup,
@@ -115,24 +126,36 @@ static struct quagga_signal_t ripd_signals[] = {
 	},
 };
 
-static const struct frr_yang_module_info *ripd_yang_modules[] = {
+static const struct frr_yang_module_info *const ripd_yang_modules[] = {
+	&frr_backend_info,
+	&frr_filter_info,
 	&frr_interface_info,
 	&frr_ripd_info,
+	&frr_route_map_info,
+	&frr_vrf_info,
+	&ietf_key_chain_info,
+	&ietf_key_chain_deviation_info,
 };
 
-FRR_DAEMON_INFO(ripd, RIP, .vty_port = RIP_VTY_PORT,
+/* clang-format off */
+FRR_DAEMON_INFO(ripd, RIP,
+	.vty_port = RIP_VTY_PORT,
+	.proghelp = "Implementation of the RIP routing protocol.",
 
-		.proghelp = "Implementation of the RIP routing protocol.",
+	.signals = ripd_signals,
+	.n_signals = array_size(ripd_signals),
 
-		.signals = ripd_signals, .n_signals = array_size(ripd_signals),
+	.privs = &ripd_privs,
 
-		.privs = &ripd_privs, .yang_modules = ripd_yang_modules,
-		.n_yang_modules = array_size(ripd_yang_modules), )
+	.yang_modules = ripd_yang_modules,
+	.n_yang_modules = array_size(ripd_yang_modules),
 
-#if CONFDATE > 20190521
-CPP_NOTICE("-r / --retain has reached deprecation EOL, remove")
-#endif
-#define DEPRECATED_OPTIONS "r"
+	/* mgmtd will load the per-daemon config file now */
+	.flags = FRR_NO_SPLIT_CONFIG,
+);
+/* clang-format on */
+
+#define DEPRECATED_OPTIONS ""
 
 /* Main routine of ripd. */
 int main(int argc, char **argv)
@@ -162,7 +185,6 @@ int main(int argc, char **argv)
 			break;
 		default:
 			frr_help_exit(1);
-			break;
 		}
 	}
 
@@ -170,19 +192,23 @@ int main(int argc, char **argv)
 	master = frr_init();
 
 	/* Library initialization. */
+	libagentx_init();
 	rip_error_init();
-	keychain_init();
+	keychain_init_new(true);
 	rip_vrf_init();
 
 	/* RIP related initialization. */
 	rip_init();
 	rip_if_init();
-	rip_cli_init();
+
+	mgmt_be_client = mgmt_be_client_create("ripd", NULL, 0, master);
+
 	rip_zclient_init(master);
+	rip_bfd_init(master);
 
 	frr_config_fork();
 	frr_run(master);
 
 	/* Not reached. */
-	return (0);
+	return 0;
 }

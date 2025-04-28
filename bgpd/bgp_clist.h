@@ -1,21 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* BGP Community list.
  * Copyright (C) 1999 Kunihiro Ishiguro
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #ifndef _QUAGGA_BGP_CLIST_H
@@ -35,6 +20,12 @@
 /* Number and string based community-list name.  */
 #define COMMUNITY_LIST_STRING          0
 #define COMMUNITY_LIST_NUMBER          1
+/* The numbered community-list (including large/ext communities)
+ * have a range between 1-500.
+ */
+#define COMMUNITY_LIST_NUMBER_MAX 500
+
+#define COMMUNITY_SEQ_NUMBER_AUTO     -1
 
 /* Community-list entry types.  */
 #define COMMUNITY_LIST_STANDARD        0 /* Standard community-list.  */
@@ -78,8 +69,8 @@ struct community_entry {
 	/* Standard or expanded.  */
 	uint8_t style;
 
-	/* Any match.  */
-	uint8_t any;
+	/* Sequence number. */
+	int64_t seq;
 
 	/* Community structure.  */
 	union {
@@ -122,58 +113,71 @@ struct community_list_handler {
 };
 
 /* Error code of community-list.  */
-#define COMMUNITY_LIST_ERR_CANT_FIND_LIST        -1
-#define COMMUNITY_LIST_ERR_MALFORMED_VAL         -2
-#define COMMUNITY_LIST_ERR_STANDARD_CONFLICT     -3
-#define COMMUNITY_LIST_ERR_EXPANDED_CONFLICT     -4
-
+#define COMMUNITY_LIST_ERR_MALFORMED_VAL     -1
+#define COMMUNITY_LIST_ERR_STANDARD_CONFLICT -2
+#define COMMUNITY_LIST_ERR_EXPANDED_CONFLICT -3
 /* Handler.  */
 extern struct community_list_handler *bgp_clist;
 
 /* Prototypes.  */
 extern struct community_list_handler *community_list_init(void);
-extern void community_list_terminate(struct community_list_handler *);
+extern void community_list_terminate(struct community_list_handler *ch);
 
 extern int community_list_set(struct community_list_handler *ch,
-			      const char *name, const char *str, int direct,
-			      int style);
-extern int community_list_unset(struct community_list_handler *ch,
-				const char *name, const char *str, int direct,
-				int style);
+			      const char *name, const char *str,
+			      const char *seq, int direct, int style);
+extern void community_list_unset(struct community_list_handler *ch,
+				 const char *name, const char *str,
+				 const char *seq, int direct, int style);
 extern int extcommunity_list_set(struct community_list_handler *ch,
-				 const char *name, const char *str, int direct,
-				 int style);
-extern int extcommunity_list_unset(struct community_list_handler *ch,
-				   const char *name, const char *str,
-				   int direct, int style);
+				 const char *name, const char *str,
+				 const char *seq, int direct, int style);
+extern void extcommunity_list_unset(struct community_list_handler *ch,
+				    const char *name, const char *str,
+				    const char *seq, int direct, int style);
 extern int lcommunity_list_set(struct community_list_handler *ch,
-			       const char *name, const char *str, int direct,
-			       int style);
-extern int lcommunity_list_unset(struct community_list_handler *ch,
-				 const char *name, const char *str, int direct,
-				 int style);
+			       const char *name, const char *str,
+			       const char *seq, int direct, int style);
+extern bool lcommunity_list_valid(const char *community, int style);
+extern void lcommunity_list_unset(struct community_list_handler *ch,
+				  const char *name, const char *str,
+				  const char *seq, int direct, int style);
 
 extern struct community_list_master *
-community_list_master_lookup(struct community_list_handler *, int);
+community_list_master_lookup(struct community_list_handler *ch, int master);
 
 extern struct community_list *
 community_list_lookup(struct community_list_handler *c, const char *name,
 		      uint32_t name_hash, int master);
 
-extern int community_list_match(struct community *, struct community_list *);
-extern int ecommunity_list_match(struct ecommunity *, struct community_list *);
-extern int lcommunity_list_match(struct lcommunity *, struct community_list *);
-extern int community_list_exact_match(struct community *,
-				      struct community_list *);
-extern struct community *community_list_match_delete(struct community *,
-						     struct community_list *);
+extern bool community_list_match(struct community *com,
+				 struct community_list *list);
+extern bool ecommunity_list_match(struct ecommunity *ecom,
+				  struct community_list *list);
+extern bool lcommunity_list_match(struct lcommunity *lcom,
+				  struct community_list *list);
+extern bool community_list_exact_match(struct community *com,
+				       struct community_list *list);
+extern bool lcommunity_list_exact_match(struct lcommunity *lcom,
+					struct community_list *list);
+extern bool community_list_any_match(struct community *com,
+				     struct community_list *list);
+extern struct community *
+community_list_match_delete(struct community *com, struct community_list *list);
+extern bool lcommunity_list_any_match(struct lcommunity *lcom,
+				      struct community_list *list);
 extern struct lcommunity *
 lcommunity_list_match_delete(struct lcommunity *lcom,
+			     struct community_list *list);
+extern struct ecommunity *
+ecommunity_list_match_delete(struct ecommunity *ecom,
 			     struct community_list *list);
 
 static inline uint32_t bgp_clist_hash_key(char *name)
 {
 	return jhash(name, strlen(name), 0xdeadbeaf);
 }
+
+extern void bgp_community_list_command_completion_setup(void);
 
 #endif /* _QUAGGA_BGP_CLIST_H */

@@ -1,26 +1,14 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * ASCII table generator.
  * Copyright (C) 2017  Cumulus Networks
  * Quentin Young
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 #ifndef _TERMTABLE_H_
 #define _TERMTABLE_H_
 
 #include <zebra.h>
+#include "lib/json.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -80,7 +68,7 @@ struct ttable {
 #define TTSTYLE_ASCII 0
 #define TTSTYLE_BLANK 1
 
-extern struct ttable_style ttable_styles[2];
+extern const struct ttable_style ttable_styles[2];
 
 /**
  * Creates a new table with the default style, which looks like this:
@@ -95,7 +83,7 @@ extern struct ttable_style ttable_styles[2];
  *
  * @return the created table
  */
-struct ttable *ttable_new(struct ttable_style *tts);
+struct ttable *ttable_new(const struct ttable_style *tts);
 
 /**
  * Deletes a table and releases all associated resources.
@@ -103,13 +91,6 @@ struct ttable *ttable_new(struct ttable_style *tts);
  * @param tt the table to destroy
  */
 void ttable_del(struct ttable *tt);
-
-/**
- * Deletes an individual cell.
- *
- * @param cell the cell to destroy
- */
-void ttable_cell_del(struct ttable_cell *cell);
 
 /**
  * Inserts a new row at the given index.
@@ -137,8 +118,7 @@ void ttable_cell_del(struct ttable_cell *cell);
  * columns were specified
  */
 struct ttable_cell *ttable_insert_row(struct ttable *tt, unsigned int row,
-				      const char *format, ...)
-	PRINTF_ATTRIBUTE(3, 4);
+				      const char *format, ...) PRINTFRR(3, 4);
 /**
  * Inserts a new row at the end of the table.
  *
@@ -164,7 +144,7 @@ struct ttable_cell *ttable_insert_row(struct ttable *tt, unsigned int row,
  * columns were specified
  */
 struct ttable_cell *ttable_add_row(struct ttable *tt, const char *format, ...)
-	PRINTF_ATTRIBUTE(2, 3);
+	PRINTFRR(2, 3);
 
 /**
  * Removes a row from the table.
@@ -290,13 +270,39 @@ void ttable_rowseps(struct ttable *tt, unsigned int row,
  *
  * Caller must free this string after use with
  *
- *   XFREE (MTYPE_TMP, str);
+ *   XFREE (MTYPE_TMP_TTABLE, str);
  *
  * @param tt the table to dump
  * @param newline the desired newline sequence to use, null terminated.
  * @return table in text form
  */
 char *ttable_dump(struct ttable *tt, const char *newline);
+
+/**
+ * Convert a table to a JSON array of objects.
+ *
+ * Caller must free the returned json_object structure.
+ *
+ * @param tt the table to convert
+ * @param formats an array of characters indicating what JSON type should be
+ * used.
+ */
+json_object *ttable_json(struct ttable *tt, const char *const formats);
+
+/**
+ * Convert a table to a JSON array of objects.
+ *
+ * Caller must free the returned json_object structure.
+ *
+ * @param tt the table to convert
+ * @param formats an array of characters indicating what JSON type should be
+ * used.
+ * @param formats an optinal string of row headers that overrids the first row of the table.
+ * This is useful to get naming convention that align with caml Format.
+ */
+json_object *ttable_json_with_json_text(struct ttable *tt,
+					const char *const formats,
+					const char *json_override_text);
 
 #ifdef __cplusplus
 }

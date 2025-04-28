@@ -1,70 +1,94 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* SNMP support
  * Copyright (C) 2012 Vincent Bernat <bernat@luffy.cx>
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
+#include <fcntl.h>
 
 #ifdef SNMP_AGENTX
 #include <net-snmp/net-snmp-config.h>
 #include <net-snmp/net-snmp-includes.h>
 #include <net-snmp/agent/net-snmp-agent-includes.h>
 #include <net-snmp/agent/snmp_vars.h>
+#include <net-snmp/library/large_fd_set.h>
 
 #include "command.h"
 #include "smux.h"
 #include "memory.h"
 #include "linklist.h"
-#include "version.h"
+#include "lib/version.h"
 #include "lib_errors.h"
+#include "hook.h"
+#include "libfrr.h"
+#include "xref.h"
+#include "lib/libagentx.h"
 
-static int agentx_enabled = 0;
+XREF_SETUP();
 
-static struct thread_master *agentx_tm;
-static struct thread *timeout_thr = NULL;
+DEFINE_HOOK(agentx_enabled, (), ());
+
+//bool agentx_enabled = false;
+
+static struct event_loop *agentx_tm;
+static struct event *timeout_thr = NULL;
 static struct list *events = NULL;
 
 static void agentx_events_update(void);
 
-static int agentx_timeout(struct thread *t)
+static void agentx_timeout(struct event *t)
 {
-	timeout_thr = NULL;
-
 	snmp_timeout();
 	run_alarms();
 	netsnmp_check_outstanding_agent_requests();
 	agentx_events_update();
-	return 0;
 }
 
-static int agentx_read(struct thread *t)
+static void agentx_read(struct event *t)
 {
-	fd_set fds;
-	struct listnode *ln = THREAD_ARG(t);
+	netsnmp_large_fd_set lfds;
+	int flags, new_flags = 0;
+	int nonblock = false;
+	struct listnode *ln = EVENT_ARG(t);
+	struct event **thr = listgetdata(ln);
+	XFREE(MTYPE_TMP, thr);
 	list_delete_node(events, ln);
 
-	FD_ZERO(&fds);
-	FD_SET(THREAD_FD(t), &fds);
-	snmp_read(&fds);
+	/* fix for non blocking socket */
+	flags = fcntl(EVENT_FD(t), F_GETFL, 0);
+	if (-1 == flags) {
+		flog_err(EC_LIB_SYSTEM_CALL, "Failed to get FD settings fcntl: %s(%d)",
+			 strerror(errno), errno);
+		return;
+	}
+
+	if (flags & O_NONBLOCK)
+		nonblock = true;
+	else
+		new_flags = fcntl(EVENT_FD(t), F_SETFL, flags | O_NONBLOCK);
+
+	if (new_flags == -1)
+		flog_err(EC_LIB_SYSTEM_CALL, "Failed to set snmp fd non blocking: %s(%d)",
+			 strerror(errno), errno);
+
+	netsnmp_large_fd_set_init(&lfds, FD_SETSIZE);
+	netsnmp_large_fd_setfd(t->u.fd, &lfds);
+	snmp_read2(&lfds);
+
+	/* Reset the flag */
+	if (!nonblock) {
+		new_flags = fcntl(EVENT_FD(t), F_SETFL, flags);
+
+		if (new_flags == -1)
+			flog_err(
+				EC_LIB_SYSTEM_CALL,
+				"Failed to set snmp fd back to original settings: %s(%d)",
+				strerror(errno), errno);
+	}
 
 	netsnmp_check_outstanding_agent_requests();
 	agentx_events_update();
-	return 0;
+	netsnmp_large_fd_set_cleanup(&lfds);
 }
 
 static void agentx_events_update(void)
@@ -72,25 +96,24 @@ static void agentx_events_update(void)
 	int maxfd = 0;
 	int block = 1;
 	struct timeval timeout = {.tv_sec = 0, .tv_usec = 0};
-	fd_set fds;
+	netsnmp_large_fd_set lfds;
 	struct listnode *ln;
-	struct thread *thr;
+	struct event **thr;
 	int fd, thr_fd;
 
-	THREAD_OFF(timeout_thr);
+	event_cancel(&timeout_thr);
 
-	FD_ZERO(&fds);
-	snmp_select_info(&maxfd, &fds, &timeout, &block);
+	netsnmp_large_fd_set_init(&lfds, FD_SETSIZE);
+	snmp_select_info2(&maxfd, &lfds, &timeout, &block);
 
 	if (!block) {
-		timeout_thr = NULL;
-		thread_add_timer_tv(agentx_tm, agentx_timeout, NULL, &timeout,
-				    &timeout_thr);
+		event_add_timer_tv(agentx_tm, agentx_timeout, NULL, &timeout,
+				   &timeout_thr);
 	}
 
 	ln = listhead(events);
 	thr = ln ? listgetdata(ln) : NULL;
-	thr_fd = thr ? THREAD_FD(thr) : -1;
+	thr_fd = thr ? EVENT_FD(*thr) : -1;
 
 	/* "two-pointer" / two-list simultaneous iteration
 	 * ln/thr/thr_fd point to the next existing event listener to hit while
@@ -99,21 +122,22 @@ static void agentx_events_update(void)
 		/* caught up */
 		if (thr_fd == fd) {
 			struct listnode *nextln = listnextnode(ln);
-			if (!FD_ISSET(fd, &fds)) {
-				thread_cancel(thr);
+			if (!netsnmp_large_fd_is_set(fd, &lfds)) {
+				event_cancel(thr);
+				XFREE(MTYPE_TMP, thr);
 				list_delete_node(events, ln);
 			}
 			ln = nextln;
 			thr = ln ? listgetdata(ln) : NULL;
-			thr_fd = thr ? THREAD_FD(thr) : -1;
+			thr_fd = thr ? EVENT_FD(*thr) : -1;
 		}
 		/* need listener, but haven't hit one where it would be */
-		else if (FD_ISSET(fd, &fds)) {
+		else if (netsnmp_large_fd_is_set(fd, &lfds)) {
 			struct listnode *newln;
-			thr = NULL;
-			thread_add_read(agentx_tm, agentx_read, NULL, fd, &thr);
+
+			thr = XCALLOC(MTYPE_TMP, sizeof(struct event *));
 			newln = listnode_add_before(events, ln, thr);
-			thr->arg = newln;
+			event_add_read(agentx_tm, agentx_read, newln, fd, thr);
 		}
 	}
 
@@ -121,16 +145,14 @@ static void agentx_events_update(void)
 	 */
 	while (ln) {
 		struct listnode *nextln = listnextnode(ln);
-		thread_cancel(listgetdata(ln));
+		thr = listgetdata(ln);
+		event_cancel(thr);
+		XFREE(MTYPE_TMP, thr);
 		list_delete_node(events, ln);
 		ln = nextln;
 	}
+	netsnmp_large_fd_set_cleanup(&lfds);
 }
-
-/* AgentX node. */
-static struct cmd_node agentx_node = {SMUX_NODE,
-				      "", /* AgentX has no interface. */
-				      1};
 
 /* Logging NetSNMP messages */
 static int agentx_log_callback(int major, int minor, void *serverarg,
@@ -171,43 +193,44 @@ static int agentx_log_callback(int major, int minor, void *serverarg,
 	return SNMP_ERR_NOERROR;
 }
 
-static int config_write_agentx(struct vty *vty)
-{
-	if (agentx_enabled)
-		vty_out(vty, "agentx\n");
-	return 1;
-}
-
-DEFUN (agentx_enable,
-       agentx_enable_cmd,
-       "agentx",
-       "SNMP AgentX protocol settings\n")
+static int agentx_cli_on(void)
 {
 	if (!agentx_enabled) {
 		init_snmp(FRR_SMUX_NAME);
 		events = list_new();
 		agentx_events_update();
-		agentx_enabled = 1;
+		agentx_enabled = true;
+		hook_call(agentx_enabled);
 	}
 
-	return CMD_SUCCESS;
+	return 1;
 }
 
-DEFUN (no_agentx,
-       no_agentx_cmd,
-       "no agentx",
-       NO_STR
-       "SNMP AgentX protocol settings\n")
+static int agentx_cli_off(void)
 {
 	if (!agentx_enabled)
-		return CMD_SUCCESS;
-	vty_out(vty, "SNMP AgentX support cannot be disabled once enabled\n");
-	return CMD_WARNING_CONFIG_FAILED;
+		return 1;
+	return 0;
 }
 
-void smux_init(struct thread_master *tm)
+static int smux_disable(void)
+{
+	agentx_enabled = false;
+
+	return 0;
+}
+
+bool smux_enabled(void)
+{
+	return agentx_enabled;
+}
+
+void smux_init(struct event_loop *tm)
 {
 	agentx_tm = tm;
+
+	hook_register(agentx_cli_enabled, agentx_cli_on);
+	hook_register(agentx_cli_disabled, agentx_cli_off);
 
 	netsnmp_enable_subagent();
 	snmp_disable_log();
@@ -216,9 +239,17 @@ void smux_init(struct thread_master *tm)
 			       agentx_log_callback, NULL);
 	init_agent(FRR_SMUX_NAME);
 
-	install_node(&agentx_node, config_write_agentx);
-	install_element(CONFIG_NODE, &agentx_enable_cmd);
-	install_element(CONFIG_NODE, &no_agentx_cmd);
+	hook_register(frr_early_fini, smux_disable);
+}
+
+void smux_agentx_enable(void)
+{
+	if (!agentx_enabled) {
+		init_snmp(FRR_SMUX_NAME);
+		events = list_new();
+		agentx_events_update();
+		agentx_enabled = true;
+	}
 }
 
 void smux_register_mib(const char *descr, struct variable *var, size_t width,
@@ -227,14 +258,31 @@ void smux_register_mib(const char *descr, struct variable *var, size_t width,
 	register_mib(descr, var, width, num, name, namelen);
 }
 
-int smux_trap(struct variable *vp, size_t vp_len, const oid *ename,
-	      size_t enamelen, const oid *name, size_t namelen,
-	      const oid *iname, size_t inamelen,
-	      const struct trap_object *trapobj, size_t trapobjlen,
-	      uint8_t sptrap)
+void smux_trap(struct variable *vp, size_t vp_len, const oid *ename,
+	       size_t enamelen, const oid *name, size_t namelen,
+	       const oid *iname, size_t inamelen,
+	       const struct trap_object *trapobj, size_t trapobjlen,
+	       uint8_t sptrap)
+{
+	struct index_oid trap_index[1];
+
+	/* copy the single index into the multi-index format */
+	oid_copy(trap_index[0].indexname, iname, inamelen);
+	trap_index[0].indexlen = inamelen;
+
+	smux_trap_multi_index(vp, vp_len, ename, enamelen, name, namelen,
+			      trap_index, array_size(trap_index), trapobj,
+			      trapobjlen, sptrap);
+}
+
+int smux_trap_multi_index(struct variable *vp, size_t vp_len, const oid *ename,
+			  size_t enamelen, const oid *name, size_t namelen,
+			  struct index_oid *iname, size_t index_len,
+			  const struct trap_object *trapobj, size_t trapobjlen,
+			  uint8_t sptrap)
 {
 	oid objid_snmptrap[] = {1, 3, 6, 1, 6, 3, 1, 1, 4, 1, 0};
-	size_t objid_snmptrap_len = sizeof objid_snmptrap / sizeof(oid);
+	size_t objid_snmptrap_len = sizeof(objid_snmptrap) / sizeof(oid);
 	oid notification_oid[MAX_OID_LEN];
 	size_t notification_oid_len;
 	unsigned int i;
@@ -261,6 +309,13 @@ int smux_trap(struct variable *vp, size_t vp_len, const oid *ename,
 		size_t val_len;
 		WriteMethod *wm = NULL;
 		struct variable cvp;
+		unsigned int iindex;
+		/*
+		 * this allows the behaviour of smux_trap with a singe index
+		 * for all objects to be maintained whilst allowing traps which
+		 * have different indices per object to be supported
+		 */
+		iindex = (index_len == 1) ? 0 : i;
 
 		/* Make OID. */
 		if (trapobj[i].namelen > 0) {
@@ -268,8 +323,10 @@ int smux_trap(struct variable *vp, size_t vp_len, const oid *ename,
 			onamelen = trapobj[i].namelen;
 			oid_copy(oid, name, namelen);
 			oid_copy(oid + namelen, trapobj[i].name, onamelen);
-			oid_copy(oid + namelen + onamelen, iname, inamelen);
-			oid_len = namelen + onamelen + inamelen;
+			oid_copy(oid + namelen + onamelen,
+				 iname[iindex].indexname,
+				 iname[iindex].indexlen);
+			oid_len = namelen + onamelen + iname[iindex].indexlen;
 		} else {
 			/* Scalar object */
 			onamelen = trapobj[i].namelen * (-1);
@@ -295,6 +352,7 @@ int smux_trap(struct variable *vp, size_t vp_len, const oid *ename,
 			cvp.magic = vp[j].magic;
 			cvp.acl = vp[j].acl;
 			cvp.findVar = vp[j].findVar;
+
 			/* Grab the result. */
 			val = cvp.findVar(&cvp, oid, &oid_len, 1, &val_len,
 					  &wm);
@@ -314,4 +372,21 @@ int smux_trap(struct variable *vp, size_t vp_len, const oid *ename,
 	return 1;
 }
 
+void smux_events_update(void)
+{
+	agentx_events_update();
+}
+
+static void smux_events_delete_thread(void *arg)
+{
+	XFREE(MTYPE_TMP, arg);
+}
+
+void smux_terminate(void)
+{
+	if (events) {
+		events->del = smux_events_delete_thread;
+		list_delete(&events);
+	}
+}
 #endif /* SNMP_AGENTX */

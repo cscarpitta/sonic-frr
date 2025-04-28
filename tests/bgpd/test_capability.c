@@ -1,21 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Copyright (C) 2007 Sun Microsystems, Inc.
- *
- * This file is part of Quagga.
- *
- * Quagga is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * Quagga is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
@@ -44,8 +29,8 @@
 #define OPT_PARAM  2
 
 /* need these to link in libbgp */
-struct zebra_privs_t *bgpd_privs = NULL;
-struct thread_master *master = NULL;
+struct zebra_privs_t bgpd_privs = {};
+struct event_loop *master = NULL;
 
 static int failed = 0;
 static int tty = 0;
@@ -632,6 +617,7 @@ static struct test_segment misc_segments[] =
 			},
 			2,
 			SHOULD_ERR,
+			-1,
 		},
 		{
 			"dyn-empty",
@@ -648,6 +634,35 @@ static struct test_segment misc_segments[] =
 			{CAPABILITY_CODE_DYNAMIC, 0x0},
 			2,
 			SHOULD_PARSE,
+		},
+		{
+			"Role",
+			"Role capability",
+			{
+				/* hdr */ 0x9, 0x1,
+				0x1,
+			},
+			3,
+			SHOULD_PARSE,
+		},
+		{
+			"Role-long",
+			"Role capability, but too long",
+			{
+				/* hdr */ 0x9, 0x4,
+				0x0, 0x0, 0x0, 0x1,
+			},
+			6,
+			SHOULD_ERR,
+		},
+		{
+			"Role-empty",
+			"Role capability, but empty.",
+			{
+				/* hdr */ 0x9, 0x0,
+			},
+			2,
+			SHOULD_ERR,
 		},
 		{NULL, NULL, {0}, 0, 0}};
 
@@ -821,7 +836,7 @@ static void parse_test(struct peer *peer, struct test_segment *t, int type)
 	switch (type) {
 	case CAPABILITY:
 		len += 2; /* to cover the OPT-Param header */
-		_FALLTHROUGH
+		fallthrough;
 	case OPT_PARAM:
 		printf("len: %u\n", len);
 		/* peek_for_as4 wants getp at capibility*/
@@ -833,7 +848,7 @@ static void parse_test(struct peer *peer, struct test_segment *t, int type)
 		ret = bgp_open_option_parse(peer, len, &capability);
 		break;
 	case DYNCAP:
-		ret = bgp_capability_receive(peer, t->len);
+		ret = bgp_capability_receive(peer->connection, peer, t->len);
 		break;
 	default:
 		printf("unknown type %u\n", type);
@@ -911,18 +926,20 @@ int main(void)
 	term_bgp_debug_as4 = -1UL;
 
 	qobj_init();
-	master = thread_master_create(NULL);
-	bgp_master_init(master);
-	vrf_init(NULL, NULL, NULL, NULL, NULL);
+	master = event_master_create(NULL);
+	bgp_master_init(master, BGP_SOCKET_SNDBUF_SIZE, list_new());
+	vrf_init(NULL, NULL, NULL, NULL);
 	bgp_option_set(BGP_OPT_NO_LISTEN);
 
+	frr_pthread_init();
 	bgp_pthreads_init();
 	bgp_pth_ka->running = true;
 
 	if (fileno(stdout) >= 0)
 		tty = isatty(fileno(stdout));
 
-	if (bgp_get(&bgp, &asn, NULL, BGP_INSTANCE_TYPE_DEFAULT))
+	if (bgp_get(&bgp, &asn, NULL, BGP_INSTANCE_TYPE_DEFAULT, NULL,
+		    ASNOTATION_PLAIN) < 0)
 		return -1;
 
 	peer = peer_create_accept(bgp);
@@ -956,7 +973,8 @@ int main(void)
 		parse_test(peer, &opt_params[i++], OPT_PARAM);
 
 	SET_FLAG(peer->cap, PEER_CAP_DYNAMIC_ADV);
-	peer->status = Established;
+	peer->connection = bgp_peer_connection_new(peer);
+	peer->connection->status = Established;
 
 	i = 0;
 	while (dynamic_cap_msgs[i].name)

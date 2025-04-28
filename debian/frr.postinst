@@ -16,9 +16,11 @@ adduser \
 	frr
 usermod -a -G frrvty frr
 
-mkdir -p /var/log/frr
+mkdir -m 0755 -p /var/log/frr
+mkdir -m 0700 -p /var/lib/frr
 mkdir -p /etc/frr
 
+chown frr: /var/lib/frr
 
 # only change ownership of files when they were previously owned by root or
 # quagga; this is to ensure we don't trample over some custom user setup.
@@ -40,7 +42,7 @@ find \
 	# don't chown anything that has ACLs (but don't fail if we don't
 	# have getfacl)
 	if { getfacl -c "$filename" 2>/dev/null || true; } \
-		| egrep -q -v '^((user|group|other)::|$)'; then
+		| grep -E -q -v '^((user|group|other)::|$)'; then
 		:
 	else
 		chown frr: "$filename"

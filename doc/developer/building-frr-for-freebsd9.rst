@@ -17,8 +17,8 @@ is first package install and asked)
 ::
 
     pkg install -y git autoconf automake libtool gmake \
-        pkgconf texinfo json-c bison flex py27-pytest c-ares \
-        python3 py-sphinx libexecinfo
+        pkgconf texinfo json-c bison flex py36-pytest c-ares \
+        python3 py36-sphinx libexecinfo protobuf-c
 
 Make sure there is no /usr/bin/flex preinstalled (and use the newly
 installed in /usr/local/bin): (FreeBSD frequently provides a older flex
@@ -70,9 +70,9 @@ an example)
     export LDFLAGS="-L/usr/local/lib"
     export CPPFLAGS="-I/usr/local/include"
     ./configure \
-        --sysconfdir=/usr/local/etc/frr \
+        --sysconfdir=/usr/local/etc \
+        --localstatedir=/var \
         --enable-pkgsrcrcdir=/usr/pkg/share/examples/rc.d \
-        --localstatedir=/var/run/frr \
         --prefix=/usr/local \
         --enable-multipath=64 \
         --enable-user=frr \

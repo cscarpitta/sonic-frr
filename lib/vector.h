@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Generic vector interface header.
  * Copyright (C) 1997, 98 Kunihiro Ishiguro
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #ifndef _ZEBRA_VECTOR_H
@@ -30,8 +15,26 @@ extern "C" {
 
 /* struct for vector */
 struct _vector {
-	unsigned int active;  /* number of active slots */
-	unsigned int alloced; /* number of allocated slot */
+	/* active: index of last non-NULL item (+1)
+	 * count:  number of non-NULL items (+1)
+	 *
+	 * the two will be different if a slot is set to NULL (without pulling
+	 * up later items in the array).  Whether this happens depends on
+	 * which vector functions are used.  If no empty slots are used, the
+	 * two fields will be identical.
+	 *
+	 * alloced: size of array pointed to by index.  If this is 0, index
+	 * points at a global variable rather than a malloc'd bit of memory.
+	 * The vector code will convert to malloc'd memory if necessary to
+	 * perform updates.
+	 */
+	unsigned int active;
+	unsigned int alloced;
+	unsigned int count;
+
+	/* whether struct _vector itself is dynamically allocated */
+	bool dynamic;
+
 	void **index;	 /* index to data */
 };
 typedef struct _vector *vector;
@@ -59,9 +62,12 @@ extern void vector_unset_value(vector v, void *val);
 extern void vector_remove(vector v, unsigned int ix);
 extern void vector_compact(vector v);
 
-extern unsigned int vector_count(vector v);
+static inline unsigned int vector_count(vector v)
+{
+	return v->count;
+}
+
 extern void vector_free(vector v);
-extern vector vector_copy(vector v);
 
 extern void *vector_lookup(vector, unsigned int);
 extern void *vector_lookup_ensure(vector, unsigned int);

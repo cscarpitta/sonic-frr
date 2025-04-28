@@ -1,22 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * OSPF LSDB support.
  * Copyright (C) 1999, 2000 Alex Zinin, Kunihiro Ishiguro, Toshiaki Takada
- *
- * This file is part of GNU Zebra.
- *
- * GNU Zebra is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the
- * Free Software Foundation; either version 2, or (at your option) any
- * later version.
- *
- * GNU Zebra is distributed in the hope that it will be useful, but
- * WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #include <zebra.h>
@@ -49,6 +34,59 @@ void ospf_lsdb_init(struct ospf_lsdb *lsdb)
 		lsdb->type[i].db = route_table_init();
 }
 
+static struct route_node *
+ospf_lsdb_linked_node_create(route_table_delegate_t *delegate,
+			     struct route_table *table)
+{
+	struct ospf_lsdb_linked_node *node;
+
+	node = XCALLOC(MTYPE_OSPF_LSDB_NODE,
+		       sizeof(struct ospf_lsdb_linked_node));
+
+	return (struct route_node *)node;
+}
+
+static void ospf_lsdb_linked_node_destroy(route_table_delegate_t *delegate,
+					  struct route_table *table,
+					  struct route_node *node)
+{
+	struct ospf_lsdb_linked_node *lsdb_linked_node =
+		(struct ospf_lsdb_linked_node *)node;
+
+	XFREE(MTYPE_OSPF_LSDB_NODE, lsdb_linked_node);
+}
+
+static route_table_delegate_t ospf_lsdb_linked_table_delegate = {
+	.create_node = ospf_lsdb_linked_node_create,
+	.destroy_node = ospf_lsdb_linked_node_destroy,
+};
+
+void ospf_lsdb_linked_init(struct ospf_lsdb *lsdb)
+{
+	int i;
+
+	for (i = OSPF_MIN_LSA; i < OSPF_MAX_LSA; i++)
+		lsdb->type[i].db = route_table_init_with_delegate(
+			&ospf_lsdb_linked_table_delegate);
+}
+
+struct ospf_lsdb_linked_node *ospf_lsdb_linked_lookup(struct ospf_lsdb *lsdb,
+						      struct ospf_lsa *lsa)
+{
+	struct ospf_lsdb_linked_node *lsdb_linked_node;
+	struct route_table *table;
+	struct prefix_ls lp;
+
+	table = lsdb->type[lsa->data->type].db;
+	ls_prefix_set(&lp, lsa);
+	lsdb_linked_node = (struct ospf_lsdb_linked_node *)
+		route_node_lookup(table, (struct prefix *)&lp);
+	if (lsdb_linked_node)
+		route_unlock_node((struct route_node *)lsdb_linked_node);
+
+	return lsdb_linked_node;
+}
+
 void ospf_lsdb_free(struct ospf_lsdb *lsdb)
 {
 	ospf_lsdb_cleanup(lsdb);
@@ -70,7 +108,7 @@ void ospf_lsdb_cleanup(struct ospf_lsdb *lsdb)
 void ls_prefix_set(struct prefix_ls *lp, struct ospf_lsa *lsa)
 {
 	if (lp && lsa && lsa->data) {
-		lp->family = 0;
+		lp->family = AF_UNSPEC;
 		lp->prefixlen = 64;
 		lp->id = lsa->data->id;
 		lp->adv_router = lsa->data->adv_router;
@@ -92,6 +130,21 @@ static void ospf_lsdb_delete_entry(struct ospf_lsdb *lsdb,
 	lsdb->type[lsa->data->type].count--;
 	lsdb->type[lsa->data->type].checksum -= ntohs(lsa->data->checksum);
 	lsdb->total--;
+
+	/* Decrement number of router LSAs received with DC bit set */
+	if (lsa->area && (lsa->area->lsdb == lsdb) && !IS_LSA_SELF(lsa) &&
+	    (lsa->data->type == OSPF_ROUTER_LSA) &&
+	    CHECK_FLAG(lsa->data->options, OSPF_OPTION_DC))
+		lsa->area->fr_info.router_lsas_recv_dc_bit--;
+
+	/*
+	 * If the LSA being deleted is indication LSA, then set the
+	 * pointer to NULL.
+	 */
+	if (lsa->area && lsa->area->fr_info.indication_lsa_self &&
+	    (lsa->area->fr_info.indication_lsa_self == lsa))
+		lsa->area->fr_info.indication_lsa_self = NULL;
+
 	rn->info = NULL;
 	route_unlock_node(rn);
 #ifdef MONITOR_LSDB_CHANGE
@@ -127,6 +180,12 @@ void ospf_lsdb_add(struct ospf_lsdb *lsdb, struct ospf_lsa *lsa)
 		lsdb->type[lsa->data->type].count_self++;
 	lsdb->type[lsa->data->type].count++;
 	lsdb->total++;
+
+	/* Increment number of router LSAs received with DC bit set */
+	if (lsa->area && (lsa->area->lsdb == lsdb) && !IS_LSA_SELF(lsa) &&
+	    (lsa->data->type == OSPF_ROUTER_LSA) &&
+	    CHECK_FLAG(lsa->data->options, OSPF_OPTION_DC))
+		lsa->area->fr_info.router_lsas_recv_dc_bit++;
 
 #ifdef MONITOR_LSDB_CHANGE
 	if (lsdb->new_lsa_hook != NULL)
@@ -198,8 +257,8 @@ struct ospf_lsa *ospf_lsdb_lookup_by_id(struct ospf_lsdb *lsdb, uint8_t type,
 
 	table = lsdb->type[type].db;
 
-	memset(&lp, 0, sizeof(struct prefix_ls));
-	lp.family = 0;
+	memset(&lp, 0, sizeof(lp));
+	lp.family = AF_UNSPEC;
 	lp.prefixlen = 64;
 	lp.id = id;
 	lp.adv_router = adv_router;
@@ -225,8 +284,8 @@ struct ospf_lsa *ospf_lsdb_lookup_by_id_next(struct ospf_lsdb *lsdb,
 
 	table = lsdb->type[type].db;
 
-	memset(&lp, 0, sizeof(struct prefix_ls));
-	lp.family = 0;
+	memset(&lp, 0, sizeof(lp));
+	lp.family = AF_UNSPEC;
 	lp.prefixlen = 64;
 	lp.id = id;
 	lp.adv_router = adv_router;

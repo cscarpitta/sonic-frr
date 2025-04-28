@@ -1,23 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /* BGP Keepalives.
  * Implements a producer thread to generate BGP keepalives for peers.
  * Copyright (C) 2017 Cumulus Networks, Inc.
  * Quentin Young
- *
- * This file is part of FRRouting.
- *
- * FRRouting is free software; you can redistribute it and/or modify it under
- * the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2, or (at your option) any later
- * version.
- *
- * FRRouting is distributed in the hope that it will be useful, but WITHOUT ANY
- * WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
- * FOR A PARTICULAR PURPOSE.  See the GNU General Public License for more
- * details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 /* clang-format off */
@@ -30,11 +15,15 @@
 #include "memory.h"		// for MTYPE_TMP, XFREE, XCALLOC, XMALLOC
 #include "monotime.h"		// for monotime, monotime_since
 
-#include "bgpd/bgpd.h"          // for peer, PEER_THREAD_KEEPALIVES_ON, peer...
+#include "bgpd/bgpd.h"          // for peer, PEER_EVENT_KEEPALIVES_ON, peer...
 #include "bgpd/bgp_debug.h"	// for bgp_debug_neighbor_events
 #include "bgpd/bgp_packet.h"	// for bgp_keepalive_send
 #include "bgpd/bgp_keepalives.h"
 /* clang-format on */
+
+DEFINE_MTYPE_STATIC(BGPD, BGP_PKAT, "Peer KeepAlive Timer");
+DEFINE_MTYPE_STATIC(BGPD, BGP_COND, "BGP Peer pthread Conditional");
+DEFINE_MTYPE_STATIC(BGPD, BGP_MUTEX, "BGP Peer pthread Mutex");
 
 /*
  * Peer KeepAlive Timer.
@@ -54,7 +43,7 @@ static struct hash *peerhash;
 
 static struct pkat *pkat_new(struct peer *peer)
 {
-	struct pkat *pkat = XMALLOC(MTYPE_TMP, sizeof(struct pkat));
+	struct pkat *pkat = XMALLOC(MTYPE_BGP_PKAT, sizeof(struct pkat));
 	pkat->peer = peer;
 	monotime(&pkat->last);
 	return pkat;
@@ -62,7 +51,7 @@ static struct pkat *pkat_new(struct peer *peer)
 
 static void pkat_del(void *pkat)
 {
-	XFREE(MTYPE_TMP, pkat);
+	XFREE(MTYPE_BGP_PKAT, pkat);
 }
 
 
@@ -95,26 +84,33 @@ static void peer_process(struct hash_bucket *hb, void *arg)
 	static struct timeval ka = {0}; // peer->v_keepalive as a timeval
 	static struct timeval diff;     // ka - elapsed
 
-	static struct timeval tolerance = {0, 100000};
+	static const struct timeval tolerance = {0, 100000};
+
+	uint32_t v_ka = atomic_load_explicit(&pkat->peer->v_keepalive,
+					     memory_order_relaxed);
+
+	/* 0 keepalive timer means no keepalives */
+	if (v_ka == 0)
+		return;
 
 	/* calculate elapsed time since last keepalive */
 	monotime_since(&pkat->last, &elapsed);
 
 	/* calculate difference between elapsed time and configured time */
-	ka.tv_sec = pkat->peer->v_keepalive;
+	ka.tv_sec = v_ka;
 	timersub(&ka, &elapsed, &diff);
 
 	int send_keepalive =
 		elapsed.tv_sec >= ka.tv_sec || timercmp(&diff, &tolerance, <);
 
 	if (send_keepalive) {
-		if (bgp_debug_neighbor_events(pkat->peer))
+		if (bgp_debug_keepalive(pkat->peer))
 			zlog_debug("%s [FSM] Timer (keepalive timer expire)",
 				   pkat->peer->host);
 
 		bgp_keepalive_send(pkat->peer);
 		monotime(&pkat->last);
-		memset(&elapsed, 0x00, sizeof(struct timeval));
+		memset(&elapsed, 0, sizeof(elapsed));
 		diff = ka;
 	}
 
@@ -131,28 +127,23 @@ static bool peer_hash_cmp(const void *f, const void *s)
 	return p1->peer == p2->peer;
 }
 
-static unsigned int peer_hash_key(void *arg)
+static unsigned int peer_hash_key(const void *arg)
 {
-	struct pkat *pkat = arg;
+	const struct pkat *pkat = arg;
 	return (uintptr_t)pkat->peer;
 }
 
 /* Cleanup handler / deinitializer. */
 static void bgp_keepalives_finish(void *arg)
 {
-	if (peerhash) {
-		hash_clean(peerhash, pkat_del);
-		hash_free(peerhash);
-	}
-
-	peerhash = NULL;
+	hash_clean_and_free(&peerhash, pkat_del);
 
 	pthread_mutex_unlock(peerhash_mtx);
 	pthread_mutex_destroy(peerhash_mtx);
 	pthread_cond_destroy(peerhash_cond);
 
-	XFREE(MTYPE_TMP, peerhash_mtx);
-	XFREE(MTYPE_TMP, peerhash_cond);
+	XFREE(MTYPE_BGP_MUTEX, peerhash_mtx);
+	XFREE(MTYPE_BGP_COND, peerhash_cond);
 }
 
 /*
@@ -168,8 +159,17 @@ void *bgp_keepalives_start(void *arg)
 	struct timeval next_update = {0, 0};
 	struct timespec next_update_ts = {0, 0};
 
-	peerhash_mtx = XCALLOC(MTYPE_TMP, sizeof(pthread_mutex_t));
-	peerhash_cond = XCALLOC(MTYPE_TMP, sizeof(pthread_cond_t));
+	/*
+	 * The RCU mechanism for each pthread is initialized in a "locked"
+	 * state. That's ok for pthreads using the frr_pthread,
+	 * event_fetch event loop, because that event loop unlocks regularly.
+	 * For foreign pthreads, the lock needs to be unlocked so that the
+	 * background rcu pthread can run.
+	 */
+	rcu_read_unlock();
+
+	peerhash_mtx = XCALLOC(MTYPE_BGP_MUTEX, sizeof(pthread_mutex_t));
+	peerhash_cond = XCALLOC(MTYPE_BGP_COND, sizeof(pthread_cond_t));
 
 	/* initialize mutex */
 	pthread_mutex_init(peerhash_mtx, NULL);
@@ -213,7 +213,7 @@ void *bgp_keepalives_start(void *arg)
 
 		hash_iterate(peerhash, peer_process, &next_update);
 		if (next_update.tv_sec == -1)
-			memset(&next_update, 0x00, sizeof(next_update));
+			memset(&next_update, 0, sizeof(next_update));
 
 		monotime_since(&currtime, &aftertime);
 
@@ -229,8 +229,10 @@ void *bgp_keepalives_start(void *arg)
 
 /* --- thread external functions ------------------------------------------- */
 
-void bgp_keepalives_on(struct peer *peer)
+void bgp_keepalives_on(struct peer_connection *connection)
 {
+	struct peer *peer = connection->peer;
+
 	if (CHECK_FLAG(peer->thread_flags, PEER_THREAD_KEEPALIVES_ON))
 		return;
 
@@ -245,22 +247,23 @@ void bgp_keepalives_on(struct peer *peer)
 	 */
 	assert(peerhash_mtx);
 
-	pthread_mutex_lock(peerhash_mtx);
-	{
+	frr_with_mutex (peerhash_mtx) {
 		holder.peer = peer;
 		if (!hash_lookup(peerhash, &holder)) {
 			struct pkat *pkat = pkat_new(peer);
-			hash_get(peerhash, pkat, hash_alloc_intern);
+			(void)hash_get(peerhash, pkat, hash_alloc_intern);
 			peer_lock(peer);
 		}
 		SET_FLAG(peer->thread_flags, PEER_THREAD_KEEPALIVES_ON);
+		/* Force the keepalive thread to wake up */
+		pthread_cond_signal(peerhash_cond);
 	}
-	pthread_mutex_unlock(peerhash_mtx);
-	bgp_keepalives_wake();
 }
 
-void bgp_keepalives_off(struct peer *peer)
+void bgp_keepalives_off(struct peer_connection *connection)
 {
+	struct peer *peer = connection->peer;
+
 	if (!CHECK_FLAG(peer->thread_flags, PEER_THREAD_KEEPALIVES_ON))
 		return;
 
@@ -275,8 +278,7 @@ void bgp_keepalives_off(struct peer *peer)
 	 */
 	assert(peerhash_mtx);
 
-	pthread_mutex_lock(peerhash_mtx);
-	{
+	frr_with_mutex (peerhash_mtx) {
 		holder.peer = peer;
 		struct pkat *res = hash_release(peerhash, &holder);
 		if (res) {
@@ -285,24 +287,17 @@ void bgp_keepalives_off(struct peer *peer)
 		}
 		UNSET_FLAG(peer->thread_flags, PEER_THREAD_KEEPALIVES_ON);
 	}
-	pthread_mutex_unlock(peerhash_mtx);
-}
-
-void bgp_keepalives_wake(void)
-{
-	pthread_mutex_lock(peerhash_mtx);
-	{
-		pthread_cond_signal(peerhash_cond);
-	}
-	pthread_mutex_unlock(peerhash_mtx);
 }
 
 int bgp_keepalives_stop(struct frr_pthread *fpt, void **result)
 {
 	assert(fpt->running);
 
-	atomic_store_explicit(&fpt->running, false, memory_order_relaxed);
-	bgp_keepalives_wake();
+	frr_with_mutex (peerhash_mtx) {
+		atomic_store_explicit(&fpt->running, false,
+				      memory_order_relaxed);
+		pthread_cond_signal(peerhash_cond);
+	}
 
 	pthread_join(fpt->thread, result);
 	return 0;

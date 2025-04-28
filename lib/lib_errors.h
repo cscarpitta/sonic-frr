@@ -1,21 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * Library-specific error messages.
  * Copyright (C) 2018  Cumulus Networks, Inc.
  *                     Donald Sharp
- *
- * This program is free software; you can redistribute it and/or modify it
- * under the terms of the GNU General Public License as published by the Free
- * Software Foundation; either version 2 of the License, or (at your option)
- * any later version.
- *
- * This program is distributed in the hope that it will be useful, but WITHOUT
- * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
- * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
- * more details.
- *
- * You should have received a copy of the GNU General Public License along
- * with this program; see the file COPYING; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
 #ifndef __LIB_ERRORS_H__
@@ -44,7 +31,11 @@ enum lib_log_refs {
 	EC_LIB_SNMP,
 	EC_LIB_STREAM,
 	EC_LIB_LINUX_NS,
-	EC_LIB_SLOW_THREAD,
+	EC_LIB_SLOW_THREAD_CPU,
+	EC_LIB_SLOW_THREAD_WALL,
+	EC_LIB_STARVE_THREAD,
+	EC_LIB_NO_THREAD,
+	EC_LIB_TIMER_TOO_LONG,
 	EC_LIB_RMAP_RECURSION_LIMIT,
 	EC_LIB_BACKUP_CONFIG,
 	EC_LIB_VRF_LENGTH,
@@ -74,14 +65,13 @@ enum lib_log_refs {
 	EC_LIB_NB_TRANSACTION_RECORD_FAILED,
 	EC_LIB_LIBYANG,
 	EC_LIB_LIBYANG_PLUGIN_LOAD,
-	EC_LIB_CONFD_INIT,
-	EC_LIB_CONFD_DATA_CONVERT,
-	EC_LIB_LIBCONFD,
 	EC_LIB_SYSREPO_INIT,
 	EC_LIB_SYSREPO_DATA_CONVERT,
 	EC_LIB_LIBSYSREPO,
+	EC_LIB_GRPC_INIT,
 	EC_LIB_ID_CONSISTENCY,
 	EC_LIB_ID_EXHAUST,
+	EC_LIB_RESOLVER,
 };
 
 extern void lib_error_init(void);

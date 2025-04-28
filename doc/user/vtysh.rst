@@ -18,8 +18,40 @@ administrator with an external editor.
 
 .. warning::
 
-   This also means the ``hostname`` and ``banner motd`` commands (which both do
-   have effect for vtysh) need to be manually updated in :file:`vtysh.conf`.
+   This also means the ``hostname``, ``domainname``, and ``banner motd`` commands
+   (which do have effect for vtysh) need to be manually updated
+   in :file:`vtysh.conf`.
+
+
+.. clicmd:: copy FILENAME running-config
+
+   Process and load a configuration file manually; each line in the
+   file is read and processed as if it were being typed (or piped) to
+   vtysh.
+
+
+Live logs
+=========
+
+.. clicmd:: terminal monitor [DAEMON]
+
+   Receive and display log messages.
+
+   It is not currently possible to change the minimum message priority (fixed
+   to debug) or output formatting.  These will likely be made configurable in
+   the future.
+
+   Log messages are received asynchronously and may be printed both during
+   command execution as well as while on the prompt.  They are printed to
+   stderr, unlike regular CLI output which is printed to stdout.  The intent is
+   that stdin/stdout might be driven by some script while log messages are
+   visible on stderr.  If stdout and stderr are the same file, the prompt and
+   pending input will be cleared and reprinted appropriately.
+
+   .. note::
+
+      If ``vtysh`` cannot keep up, some log messages may be lost.  The daemons
+      do **not** wait for, get blocked by, or buffer messages for ``vtysh``.
 
 
 Pager usage
@@ -44,8 +76,7 @@ and the :clicmd:`terminal paginate` command:
    This variable should be set by the user according to their preferences,
    in their :file:`~/.profile` file.
 
-.. index:: [no] terminal paginate
-.. clicmd:: [no] terminal paginate
+.. clicmd:: terminal paginate
 
    Enables/disables vtysh output pagination.  This command is intended to
    be placed in :file:`vtysh.conf` to set a system-wide default.  If this
@@ -92,7 +123,6 @@ could be made SGID (set group ID) to the |INSTALL_VTY_GROUP| group.
    No security guarantees are made for this configuration.
 
 
-.. index:: username USERNAME nopassword
 .. clicmd:: username USERNAME nopassword
 
   If PAM support is enabled at build-time, this command allows disabling the
@@ -101,14 +131,14 @@ could be made SGID (set group ID) to the |INSTALL_VTY_GROUP| group.
   at all.
 
 
-.. _integrated-configuration-mode:
+.. _integrated-configuration-file:
 
-Integrated configuration mode
+Integrated configuration file
 =============================
 
-Integrated configuration mode uses a single configuration file,
-:file:`frr.conf`, for all daemons. This replaces the individual files like
-:file:`zebra.conf` or :file:`bgpd.conf`.
+FRR uses a single configuration file, :file:`frr.conf`, for all daemons. This
+replaces the individual files like :file:`zebra.conf` or :file:`bgpd.conf` used
+in previous versions of the software.
 
 :file:`frr.conf` is located in |INSTALL_PREFIX_ETC|. All daemons check for the
 existence of this file at startup, and if it exists will not load their
@@ -148,17 +178,10 @@ Writing the configuration can be triggered directly by invoking *vtysh -w*.
 This may be useful for scripting. Note this command should be run as either the
 superuser or the FRR user.
 
-We recommend you do not mix the use of the two types of files. Further, it is
-better not to use the integrated :file:`frr.conf` file, as any syntax error in
-it can lead to /all/ of your daemons being unable to start up. Per daemon files
-are more robust as impact of errors in configuration are limited to the daemon
-in whose file the error is made.
+We recommend you do not mix the use of the two types of files.
 
-.. index:: service integrated-vtysh-config
 .. clicmd:: service integrated-vtysh-config
 
-.. index:: no service integrated-vtysh-config
-.. clicmd:: no service integrated-vtysh-config
 
    Control whether integrated :file:`frr.conf` file is written when
    'write file' is issued.
@@ -187,7 +210,6 @@ in whose file the error is made.
    preset one of the two operating modes and ensure consistent operation across
    installations.
 
-.. index:: write integrated
 .. clicmd:: write integrated
 
    Unconditionally (regardless of ``service integrated-vtysh-config`` setting)
